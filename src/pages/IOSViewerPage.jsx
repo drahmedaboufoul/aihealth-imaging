@@ -1,29 +1,32 @@
 /*
- * IOS Viewer page — moved from EMR (src/pages/IOSViewerPage.jsx).
+ * IOS Viewer page — mounts the ModelViewer ported from EMR.
  *
  * Modes:
- *   ?id=<patient_files.id>     Resolve via patient_files lookup + Supabase signed URL
- *   ?path=<bucket/key>          Resolve via direct Supabase storage signed URL
- *   ?demo=1                     Load a public sample STL — no auth needed (validation)
+ *   ?id=<patient_files.id>     Resolve via patient_files lookup + signed URL
+ *   ?path=<bucket/key>          Direct Supabase storage path → signed URL
+ *   ?demo=1                     No fileUrl — renders the built-in DentalModel mock
+ *                               so the visibility toggles + tools all wire up
+ *                               correctly without scale issues. Use this to
+ *                               validate the viewer end-to-end.
  *
- * Reads a 1-hour signed URL from the shared Supabase project and renders
- * the Three.js ModelViewer. The demo mode lets anyone hit the viewer
- * without an auth session, so we can validate the renderer end-to-end.
+ * Two important fixes vs. the EMR's IOSViewerPage:
+ *   - scan/patient are useMemo'd. The EMR version recreated them on every
+ *     render (including a `createdAt: new Date().toISOString()` field that
+ *     changed on every paint). ModelViewer's loading-overlay effect has
+ *     `[scan]` as a dep, so a fresh object reference each render triggered
+ *     the loading overlay every time a tool was clicked — the "viewer
+ *     reloads on every click" symptom.
+ *   - mouseSettings.leftRotation defaults to FALSE so right-click rotates,
+ *     matching exocad / dental-CAD convention (left = pick, right = rotate,
+ *     middle = pan, scroll = zoom). Phase 2.5 refactor will lock this in
+ *     properly with a full exocad-aligned interaction model.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { Loader2, AlertCircle, ArrowLeft, ExternalLink } from 'lucide-react';
 import { resolveSignedUrl } from '../lib/signedUrl';
 import { ModelViewer } from '../components/ios-viewer/ModelViewer';
-
-// Public sample mesh — Three.js examples bunny. Small (~80KB), binary STL,
-// good for validating the loader pipeline. Lives at threejs.org's CDN.
-const DEMO_FILE = {
-  url: 'https://threejs.org/examples/models/stl/binary/pr2_head_pan.stl',
-  name: 'Demo: PR2 head pan (Three.js sample)',
-  type: 'stl',
-};
 
 export default function IOSViewerPage() {
   const [searchParams] = useSearchParams();
@@ -32,7 +35,7 @@ export default function IOSViewerPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Viewer settings — same shape as the EMR's IOSViewerPage
+  // Viewer settings — same shape as EMR
   const [viewerSettings, setViewerSettings] = useState({
     maxillaVisible: true,
     maxillaOpacity: 100,
@@ -43,28 +46,35 @@ export default function IOSViewerPage() {
     showGrid: true,
   });
   const [activeTool, setActiveTool] = useState('none');
-  const [mouseSettings, setMouseSettings] = useState({ leftRotation: true });
+  // Right-click drag rotates (exocad / dental-CAD standard).
+  // Left-click is reserved for picking / measurement points.
+  const [mouseSettings, setMouseSettings] = useState({ leftRotation: false });
 
   const isDemo = searchParams.get('demo') === '1';
   const fileId = searchParams.get('id');
   const filePath = searchParams.get('path');
   const queryName = searchParams.get('name');
-  const fileType = searchParams.get('type') || (isDemo ? DEMO_FILE.type : 'stl');
+  const fileType = searchParams.get('type') || 'stl';
 
-  const patient = {
+  // Memoize patient + scan so their object references stay stable across
+  // renders. Without this, ModelViewer's `useEffect(..., [scan])` re-runs
+  // on every keystroke / tool click and re-shows the loading overlay.
+  const patient = useMemo(() => ({
     id: fileId || 'P001',
     name: queryName || (isDemo ? 'Demo Patient' : 'Patient'),
     gender: 'male',
     age: 30,
-  };
-  const scan = {
+  }), [fileId, queryName, isDemo]);
+
+  const scan = useMemo(() => ({
     id: fileId || 'S001',
     patientId: patient.id,
     type: 'IOS',
     name: fileName,
-    createdAt: new Date().toISOString(),
+    // NOTE: no createdAt — that field was recreating on every render in the
+    // EMR copy and forcing ModelViewer to re-mount its loading overlay.
     hasModel: true,
-  };
+  }), [fileId, patient.id, fileName]);
 
   useEffect(() => {
     document.title = `${queryName || (isDemo ? 'Demo' : '3D Scan')} · aiHealth Imaging`;
@@ -75,9 +85,13 @@ export default function IOSViewerPage() {
       setError(null);
       try {
         if (isDemo) {
+          // Demo intentionally leaves fileUrl null. ModelViewer's branch
+          // logic falls through to DentalModel (built-in mock maxilla +
+          // mandible + occlusion meshes) which is what the visibility
+          // toggles + tools are designed for.
           if (cancelled) return;
-          setFileUrl(DEMO_FILE.url);
-          setFileName(DEMO_FILE.name);
+          setFileUrl(null);
+          setFileName('Demo Mesh');
         } else {
           const r = await resolveSignedUrl({ id: fileId, path: filePath });
           if (cancelled) return;
@@ -120,8 +134,6 @@ export default function IOSViewerPage() {
             <code className="text-accent font-mono">?id=&lt;file_id&gt;</code> or{' '}
             <code className="text-accent font-mono">?path=&lt;bucket/key&gt;</code>{' '}
             in the URL.
-            <br />
-            To validate the renderer with no auth, try the demo mode.
           </div>
           <div className="flex items-center gap-2 mt-2">
             <Link
@@ -148,7 +160,7 @@ export default function IOSViewerPage() {
       {isDemo && (
         <div className="absolute top-2 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
           <div className="bg-accent text-bg text-[11px] font-medium px-3 py-1 rounded-full shadow-lg">
-            DEMO MODE — sample mesh, not real patient data
+            DEMO MODE — built-in mock mesh (visibility toggles + tools wired)
           </div>
         </div>
       )}

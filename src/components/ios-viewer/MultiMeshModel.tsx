@@ -182,15 +182,20 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onError }: Mul
     onLoaded?.({ count: meshes.length, bounds: groupBounds });
   }, [groupBounds, meshes.length, camera, onLoaded]);
 
-  if (meshes.length === 0) return null;
-
-  // Group-level offset so meshes render around origin
+  // Group-level offset so meshes render around origin.
+  // IMPORTANT: this useMemo MUST run before the early-return below so the
+  // hook order is identical on every render. Calling a hook conditionally
+  // throws React error #310 ("rendered more hooks than during the previous
+  // render"), which then trips THREE.WebGLRenderer context loss when the
+  // tree unmounts mid-render.
   const groupOffset = useMemo(() => {
     if (!groupBounds) return new THREE.Vector3();
     const c = new THREE.Vector3();
     groupBounds.getCenter(c);
     return c.negate();
   }, [groupBounds]);
+
+  if (meshes.length === 0) return null;
 
   return (
     <group ref={groupRef} position={groupOffset}>

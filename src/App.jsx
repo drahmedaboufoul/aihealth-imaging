@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import HomePage from './pages/HomePage';
 import HealthPage from './pages/HealthPage';
 import NotFoundPage from './pages/NotFoundPage';
+import LoginPage from './pages/LoginPage';
 import ViewerStub from './components/ViewerStub';
 
 // IOS viewer is heavy (Three.js + react-three-fiber) — lazy-load it
@@ -21,6 +22,7 @@ export default function App() {
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/health" element={<HealthPage />} />
+      <Route path="/login" element={<LoginPage />} />
 
       {/* IOS viewer — real Three.js renderer (moved from EMR 2026-05-06) */}
       <Route

@@ -23,13 +23,16 @@
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { useSearchParams, Link } from 'react-router-dom';
+import { useSearchParams, Link, useNavigate, useLocation } from 'react-router-dom';
 import { Loader2, AlertCircle, ArrowLeft, ExternalLink } from 'lucide-react';
 import { resolveSignedUrl, resolveStudyFiles } from '../lib/signedUrl';
 import { ModelViewer } from '../components/ios-viewer/ModelViewer';
+import { supabase } from '../lib/supabase';
 
 export default function IOSViewerPage() {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [fileUrl, setFileUrl] = useState(null);
   const [fileName, setFileName] = useState('3D Scan');
   // Multi-file mode (study mode): array of { url, fileName, fileType }.
@@ -88,6 +91,18 @@ export default function IOSViewerPage() {
       setLoading(true);
       setError(null);
       try {
+        // Auth gate — non-demo paths read RLS-protected tables. If there's
+        // no session, bounce to /login with a return path so the user lands
+        // back here after signing in.
+        if (!isDemo) {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (!session) {
+            const back = encodeURIComponent(location.pathname + location.search);
+            navigate(`/login?next=${back}`, { replace: true });
+            return;
+          }
+        }
+
         if (isDemo) {
           // Demo intentionally leaves fileUrl null. ModelViewer's branch
           // logic falls through to DentalModel (built-in mock maxilla +

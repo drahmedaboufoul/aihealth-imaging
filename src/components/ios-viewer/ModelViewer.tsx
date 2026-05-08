@@ -38,6 +38,8 @@ interface ModelViewerProps {
   fileType?: string;
   /** Multi-file study mode (?study=) — array of upper / lower / occlusion files */
   files?: MeshFile[] | null;
+  /** Receives per-mesh layer descriptors after MultiMeshModel finishes loading. */
+  onMeshesReady?: (layers: ViewerSettings['meshLayers']) => void;
 }
 
 // File-based 3D Model Component
@@ -532,6 +534,7 @@ export function ModelViewer({
   fileUrl,
   fileType,
   files,
+  onMeshesReady,
 }: ModelViewerProps) {
   const isMultiFile = !!(files && files.length > 0);
   const [isLoading, setIsLoading] = useState(true);
@@ -635,6 +638,7 @@ export function ModelViewer({
               <MultiMeshModel
                 files={files!}
                 viewerSettings={viewerSettings}
+                onMeshesReady={onMeshesReady}
               />
             ) : fileUrl ? (
               <FileModel
@@ -678,8 +682,8 @@ export function ModelViewer({
               zoomSpeed={0.8}
               panSpeed={0.7}
               screenSpacePanning={true}
-              minDistance={1}
-              maxDistance={50}
+              minDistance={0.1}
+              maxDistance={5000}
               mouseButtons={{
                 LEFT: mouseSettings.leftRotation ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN,
                 MIDDLE: THREE.MOUSE.DOLLY,
@@ -807,92 +811,139 @@ export function ModelViewer({
                 </div>
               )}
 
-              {/* Maxilla Control */}
-              <div className="mb-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => onUpdateSettings({ maxillaVisible: !viewerSettings.maxillaVisible })}
-                      className="text-gray-600 hover:text-gray-800"
-                    >
-                      {viewerSettings.maxillaVisible ? (
-                        <Eye className="w-4 h-4" />
-                      ) : (
-                        <EyeOff className="w-4 h-4" />
-                      )}
-                    </button>
-                    <span className="text-sm font-medium text-gray-700">Maxilla</span>
+              {/* Per-mesh layers (multi-file mode) — populated by MultiMeshModel.
+                   Falls back to per-role controls below for single-file/demo mode. */}
+              {viewerSettings.meshLayers && viewerSettings.meshLayers.length > 0 ? (
+                <>
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 mb-1.5">
+                    Layers
                   </div>
-                  <span className="text-xs text-gray-500">{viewerSettings.maxillaOpacity}%</span>
-                </div>
-                <Slider
-                  value={[viewerSettings.maxillaOpacity]}
-                  onValueChange={([value]) => onUpdateSettings({ maxillaOpacity: value })}
-                  min={0}
-                  max={100}
-                  step={1}
-                  disabled={!viewerSettings.maxillaVisible}
-                  className="w-full"
-                />
-              </div>
+                  {viewerSettings.meshLayers.map((layer) => (
+                    <div key={layer.key} className="mb-3">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              const next = (viewerSettings.meshLayers || []).map((l) =>
+                                l.key === layer.key ? { ...l, visible: !l.visible } : l
+                              );
+                              onUpdateSettings({ meshLayers: next });
+                            }}
+                            className="text-gray-600 hover:text-gray-800"
+                          >
+                            {layer.visible ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                          </button>
+                          <span className="text-sm font-medium text-gray-700">{layer.label}</span>
+                        </div>
+                        <span className="text-xs text-gray-500 tabular-nums">{layer.opacity}%</span>
+                      </div>
+                      <Slider
+                        value={[layer.opacity]}
+                        onValueChange={([value]) => {
+                          const next = (viewerSettings.meshLayers || []).map((l) =>
+                            l.key === layer.key ? { ...l, opacity: value } : l
+                          );
+                          onUpdateSettings({ meshLayers: next });
+                        }}
+                        min={0}
+                        max={100}
+                        step={1}
+                        disabled={!layer.visible}
+                        className="w-full"
+                      />
+                    </div>
+                  ))}
+                </>
+              ) : (
+                <>
+                  {/* Maxilla Control */}
+                  <div className="mb-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => onUpdateSettings({ maxillaVisible: !viewerSettings.maxillaVisible })}
+                          className="text-gray-600 hover:text-gray-800"
+                        >
+                          {viewerSettings.maxillaVisible ? (
+                            <Eye className="w-4 h-4" />
+                          ) : (
+                            <EyeOff className="w-4 h-4" />
+                          )}
+                        </button>
+                        <span className="text-sm font-medium text-gray-700">Maxilla</span>
+                      </div>
+                      <span className="text-xs text-gray-500">{viewerSettings.maxillaOpacity}%</span>
+                    </div>
+                    <Slider
+                      value={[viewerSettings.maxillaOpacity]}
+                      onValueChange={([value]) => onUpdateSettings({ maxillaOpacity: value })}
+                      min={0}
+                      max={100}
+                      step={1}
+                      disabled={!viewerSettings.maxillaVisible}
+                      className="w-full"
+                    />
+                  </div>
 
-              {/* Mandible Control */}
-              <div className="mb-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => onUpdateSettings({ mandibleVisible: !viewerSettings.mandibleVisible })}
-                      className="text-gray-600 hover:text-gray-800"
-                    >
-                      {viewerSettings.mandibleVisible ? (
-                        <Eye className="w-4 h-4" />
-                      ) : (
-                        <EyeOff className="w-4 h-4" />
-                      )}
-                    </button>
-                    <span className="text-sm font-medium text-gray-700">Mandible</span>
+                  {/* Mandible Control */}
+                  <div className="mb-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => onUpdateSettings({ mandibleVisible: !viewerSettings.mandibleVisible })}
+                          className="text-gray-600 hover:text-gray-800"
+                        >
+                          {viewerSettings.mandibleVisible ? (
+                            <Eye className="w-4 h-4" />
+                          ) : (
+                            <EyeOff className="w-4 h-4" />
+                          )}
+                        </button>
+                        <span className="text-sm font-medium text-gray-700">Mandible</span>
+                      </div>
+                      <span className="text-xs text-gray-500">{viewerSettings.mandibleOpacity}%</span>
+                    </div>
+                    <Slider
+                      value={[viewerSettings.mandibleOpacity]}
+                      onValueChange={([value]) => onUpdateSettings({ mandibleOpacity: value })}
+                      min={0}
+                      max={100}
+                      step={1}
+                      disabled={!viewerSettings.mandibleVisible}
+                      className="w-full"
+                    />
                   </div>
-                  <span className="text-xs text-gray-500">{viewerSettings.mandibleOpacity}%</span>
-                </div>
-                <Slider
-                  value={[viewerSettings.mandibleOpacity]}
-                  onValueChange={([value]) => onUpdateSettings({ mandibleOpacity: value })}
-                  min={0}
-                  max={100}
-                  step={1}
-                  disabled={!viewerSettings.mandibleVisible}
-                  className="w-full"
-                />
-              </div>
 
-              {/* Occlusion Control */}
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => onUpdateSettings({ occlusionVisible: !viewerSettings.occlusionVisible })}
-                      className="text-gray-600 hover:text-gray-800"
-                    >
-                      {viewerSettings.occlusionVisible ? (
-                        <Eye className="w-4 h-4" />
-                      ) : (
-                        <EyeOff className="w-4 h-4" />
-                      )}
-                    </button>
-                    <span className="text-sm font-medium text-gray-700">Occlusion</span>
+                  {/* Occlusion Control */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => onUpdateSettings({ occlusionVisible: !viewerSettings.occlusionVisible })}
+                          className="text-gray-600 hover:text-gray-800"
+                        >
+                          {viewerSettings.occlusionVisible ? (
+                            <Eye className="w-4 h-4" />
+                          ) : (
+                            <EyeOff className="w-4 h-4" />
+                          )}
+                        </button>
+                        <span className="text-sm font-medium text-gray-700">Occlusion</span>
+                      </div>
+                      <span className="text-xs text-gray-500">{viewerSettings.occlusionOpacity}%</span>
+                    </div>
+                    <Slider
+                      value={[viewerSettings.occlusionOpacity]}
+                      onValueChange={([value]) => onUpdateSettings({ occlusionOpacity: value })}
+                      min={0}
+                      max={100}
+                      step={1}
+                      disabled={!viewerSettings.occlusionVisible}
+                      className="w-full"
+                    />
                   </div>
-                  <span className="text-xs text-gray-500">{viewerSettings.occlusionOpacity}%</span>
-                </div>
-                <Slider
-                  value={[viewerSettings.occlusionOpacity]}
-                  onValueChange={([value]) => onUpdateSettings({ occlusionOpacity: value })}
-                  min={0}
-                  max={100}
-                  step={1}
-                  disabled={!viewerSettings.occlusionVisible}
-                  className="w-full"
-                />
-              </div>
+                </>
+              )}
             </div>
           )}
 

@@ -41,7 +41,9 @@ export default function IOSViewerPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Viewer settings — same shape as EMR
+  // Viewer settings — same shape as EMR.
+  // meshLayers is populated by MultiMeshModel after files load and supersedes
+  // the per-role flags for the right panel.
   const [viewerSettings, setViewerSettings] = useState({
     maxillaVisible: true,
     maxillaOpacity: 100,
@@ -50,6 +52,7 @@ export default function IOSViewerPage() {
     occlusionVisible: true,
     occlusionOpacity: 100,
     showGrid: true,
+    meshLayers: undefined, // [{ key, label, role, visible, opacity }] when multi-file
   });
   const [activeTool, setActiveTool] = useState('none');
   // Right-click drag rotates (exocad / dental-CAD standard).
@@ -202,7 +205,7 @@ export default function IOSViewerPage() {
         scan={scan}
         patient={patient}
         viewerSettings={viewerSettings}
-        onUpdateSettings={setViewerSettings}
+        onUpdateSettings={(updates) => setViewerSettings((s) => ({ ...s, ...updates }))}
         activeTool={activeTool}
         onSetTool={setActiveTool}
         mouseSettings={mouseSettings}
@@ -211,6 +214,9 @@ export default function IOSViewerPage() {
         fileUrl={fileUrl}
         fileType={fileType}
         files={files}
+        onMeshesReady={(layers) =>
+          setViewerSettings((s) => ({ ...s, meshLayers: layers }))
+        }
       />
     </div>
   );

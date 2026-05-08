@@ -26,6 +26,18 @@ export interface MeshFile {
   fileType?: string; // 'stl' | 'ply' | 'obj' (defaults to extension parse)
 }
 
+/** One row in the per-mesh layer panel. Caller (IOSViewerPage) maintains
+ *  this array based on what MultiMeshModel reports via onMeshesReady. */
+export interface MeshLayer {
+  /** Stable key — derived from filename, e.g. "upperjaw.stl-0". */
+  key: string;
+  /** Display label, e.g. "Maxilla", "Bite 1", "Mandible". */
+  label: string;
+  role: 'maxilla' | 'mandible' | 'occlusion' | 'unknown';
+  visible: boolean;
+  opacity: number; // 0..100
+}
+
 export interface ViewerSettingsLite {
   maxillaVisible: boolean;
   maxillaOpacity: number;   // 0..100
@@ -37,6 +49,9 @@ export interface ViewerSettingsLite {
   isolatedRole?: 'maxilla' | 'mandible' | 'occlusion' | null;
   /** When false, skip the PCA auto-orient. Default true. */
   autoOrient?: boolean;
+  /** Per-mesh layer state (multi-file mode). When present, supersedes the
+   *  per-role flags above for visibility + opacity. */
+  meshLayers?: MeshLayer[];
 }
 
 interface LoadedMesh {
@@ -100,10 +115,41 @@ interface MultiMeshModelProps {
   files: MeshFile[];
   viewerSettings: ViewerSettingsLite;
   onLoaded?: (info: { count: number; bounds: THREE.Box3 }) => void;
+  /** Reports the per-mesh layer metadata once all files have loaded so the
+   *  parent can render a per-file panel. Each call replaces the previous list. */
+  onMeshesReady?: (layers: MeshLayer[]) => void;
   onError?: (err: Error) => void;
 }
 
-export function MultiMeshModel({ files, viewerSettings, onLoaded, onError }: MultiMeshModelProps) {
+/** Build human-friendly labels — "Maxilla", "Mandible", "Bite 1", "Bite 2",
+ *  "Scan 1" for unknowns — numbering only when there are multiple of a role. */
+function buildLayerLabels(meshes: LoadedMesh[]): MeshLayer[] {
+  const counts: Record<string, number> = {};
+  for (const m of meshes) counts[m.role] = (counts[m.role] || 0) + 1;
+
+  const seen: Record<string, number> = {};
+  const baseFor = (role: LoadedMesh['role']): string => {
+    if (role === 'maxilla')   return 'Maxilla';
+    if (role === 'mandible')  return 'Mandible';
+    if (role === 'occlusion') return 'Bite';
+    return 'Scan';
+  };
+
+  return meshes.map((m, idx) => {
+    const base = baseFor(m.role);
+    seen[m.role] = (seen[m.role] || 0) + 1;
+    const label = counts[m.role] > 1 ? `${base} ${seen[m.role]}` : base;
+    return {
+      key: `${m.fileName}-${idx}`,
+      label,
+      role: m.role,
+      visible: true,
+      opacity: 100,
+    };
+  });
+}
+
+export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady, onError }: MultiMeshModelProps) {
   const [meshes, setMeshes] = useState<LoadedMesh[]>([]);
   const groupRef = useRef<THREE.Group>(null);
   const { camera } = useThree();
@@ -142,6 +188,9 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onError }: Mul
         }
 
         setMeshes(loaded);
+        // Tell the parent which layers are loaded so it can render a
+        // per-file controls panel.
+        onMeshesReady?.(buildLayerLabels(loaded));
       });
 
     return () => { cancelled = true; };
@@ -160,23 +209,37 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onError }: Mul
     return box;
   }, [meshes]);
 
-  // Auto-frame camera once everything is loaded
+  // Auto-frame camera once everything is loaded.
+  //
+  // Frame the IN-PLANE size (X = mesial-distal, Z = buccal-lingual after
+  // PCA orient) rather than the max dimension across all axes. The arch
+  // height (Y after orient) is small relative to the arch length, and
+  // including it pulls the camera too close.
+  //
+  // Distance formula: tan(fov/2) * dist = halfWidth -> dist = halfWidth / tan(fov/2)
+  // We add a 1.6× padding so there's breathing room.
   useEffect(() => {
     if (!groupBounds || meshes.length === 0) return;
     const center = new THREE.Vector3();
     const size = new THREE.Vector3();
     groupBounds.getCenter(center);
     groupBounds.getSize(size);
-    const maxDim = Math.max(size.x, size.y, size.z);
-    if (maxDim === 0) return;
 
-    // Position camera so the case fits with comfortable padding.
-    const dist = maxDim * 1.6;
     if (camera instanceof THREE.PerspectiveCamera) {
-      camera.position.set(center.x, center.y + maxDim * 0.3, center.z + dist);
+      const fovRad = (camera.fov * Math.PI) / 180;
+      const halfTan = Math.tan(fovRad / 2);
+      // The dimensions actually visible after the orient: X (length) and
+      // Z (depth). Y is the small "thickness". Use the larger of X, Z.
+      const inPlaneMax = Math.max(size.x, size.z, 1e-3);
+      const fitDist = (inPlaneMax / 2) / halfTan;
+      const dist = fitDist * 1.6 + size.y; // small Y offset so camera clears the arch top
+
+      camera.position.set(center.x, center.y + size.y * 0.6, center.z + dist);
       camera.lookAt(center);
-      camera.near = Math.max(0.1, maxDim * 0.01);
-      camera.far  = maxDim * 50;
+      // Near/far set very generously so user can zoom in to a tooth or way out.
+      const radius = Math.max(size.length() / 2, 1);
+      camera.near = Math.max(0.01, radius * 0.001);
+      camera.far  = radius * 200;
       camera.updateProjectionMatrix();
     }
     onLoaded?.({ count: meshes.length, bounds: groupBounds });
@@ -200,19 +263,28 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onError }: Mul
   return (
     <group ref={groupRef} position={groupOffset}>
       {meshes.map((m, idx) => {
+        const meshKey = `${m.fileName}-${idx}`;
+        const layer = viewerSettings.meshLayers?.find((l) => l.key === meshKey);
+
+        // Prefer per-mesh layer state when the parent provides it; fall
+        // back to per-role flags otherwise (legacy single-file mode).
         const setting = ROLE_TO_SETTING[m.role];
-        const baseVisible = (viewerSettings as any)[setting.visible] ?? true;
-        const opacityPct = (viewerSettings as any)[setting.opacity] ?? 100;
+        const baseVisible = layer
+          ? layer.visible
+          : ((viewerSettings as any)[setting.visible] ?? true);
+        const opacityPct = layer
+          ? layer.opacity
+          : ((viewerSettings as any)[setting.opacity] ?? 100);
         const style = ROLE_STYLE[m.role];
 
-        // Per-mesh isolate: when an isolatedRole is active, hide everything
-        // that doesn't match (regardless of the per-role visibility toggle).
+        // Per-role isolate (the All / Up / Low / Bite chips). When active,
+        // hide everything that doesn't match regardless of layer state.
         const isolated = viewerSettings.isolatedRole;
         const visible = isolated ? (m.role === isolated) : baseVisible;
 
         return (
           <mesh
-            key={`${m.fileName}-${idx}`}
+            key={meshKey}
             geometry={m.geometry}
             visible={visible}
             castShadow
@@ -228,8 +300,12 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onError }: Mul
               sheen={0.1}                   // soft surface
               sheenColor={0xffffff}
               side={THREE.DoubleSide}
-              transparent={opacityPct < 100}
-              opacity={opacityPct / 100}
+              // Always transparent so opacity slider responds smoothly.
+              // Toggling .transparent forces three.js to rebuild the
+              // material program — change wasn't applying mid-session.
+              transparent
+              opacity={Math.max(0, Math.min(1, opacityPct / 100))}
+              depthWrite={opacityPct >= 99}
               emissive={0x000000}
               emissiveIntensity={style.emissiveIntensity}
             />

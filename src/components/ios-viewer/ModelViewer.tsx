@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Grid, PerspectiveCamera, Line } from '@react-three/drei';
+import { OrbitControls, Grid, PerspectiveCamera, Line, Environment } from '@react-three/drei';
 import * as THREE from 'three';
 import type { Patient, Scan, ViewerSettings, ToolType, MouseSettings } from './types';
+import { MultiMeshModel, type MeshFile } from './MultiMeshModel';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
@@ -32,8 +33,11 @@ interface ModelViewerProps {
   mouseSettings: MouseSettings;
   onUpdateMouseSettings: (settings: MouseSettings) => void;
   onClose: () => void;
-  fileUrl?: string;
+  /** Single-file legacy mode (?id= or ?path=) */
+  fileUrl?: string | null;
   fileType?: string;
+  /** Multi-file study mode (?study=) — array of upper / lower / occlusion files */
+  files?: MeshFile[] | null;
 }
 
 // File-based 3D Model Component
@@ -527,7 +531,9 @@ export function ModelViewer({
   onClose,
   fileUrl,
   fileType,
+  files,
 }: ModelViewerProps) {
+  const isMultiFile = !!(files && files.length > 0);
   const [isLoading, setIsLoading] = useState(true);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [showControls, setShowControls] = useState(true);
@@ -617,11 +623,20 @@ export function ModelViewer({
         <div className="flex-1 relative">
           <Canvas shadows dpr={[1, 2]}>
             <PerspectiveCamera makeDefault position={[0, 0, 4]} fov={45} />
-            <ambientLight intensity={0.55} />
-            <directionalLight position={[5, 5, 5]} intensity={0.85} castShadow />
-            <directionalLight position={[-5, -5, -5]} intensity={0.25} />
+            <ambientLight intensity={0.45} />
+            <directionalLight position={[5, 5, 5]} intensity={0.75} castShadow />
+            <directionalLight position={[-5, -5, -5]} intensity={0.2} />
+            {/* IBL — gives the meshPhysicalMaterial proper reflections so
+                 enamel doesn't read as flat plastic. Apartment is a soft
+                 indoor preset; doesn't introduce harsh highlights. */}
+            <Environment preset="apartment" background={false} />
 
-            {fileUrl ? (
+            {isMultiFile ? (
+              <MultiMeshModel
+                files={files!}
+                viewerSettings={viewerSettings}
+              />
+            ) : fileUrl ? (
               <FileModel
                 fileUrl={fileUrl}
                 fileType={fileType || 'stl'}
@@ -647,7 +662,9 @@ export function ModelViewer({
               />
             )}
 
-            <CameraAutoFit trigger={fileUrl || 'demo'} />
+            {/* MultiMeshModel does its own auto-frame across the whole case;
+                 only invoke CameraAutoFit for the legacy single-file/demo paths. */}
+            {!isMultiFile && <CameraAutoFit trigger={fileUrl || 'demo'} />}
 
             <OrbitControls
               ref={controlsRef}

@@ -25,13 +25,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { Loader2, AlertCircle, ArrowLeft, ExternalLink } from 'lucide-react';
-import { resolveSignedUrl } from '../lib/signedUrl';
+import { resolveSignedUrl, resolveStudyFiles } from '../lib/signedUrl';
 import { ModelViewer } from '../components/ios-viewer/ModelViewer';
 
 export default function IOSViewerPage() {
   const [searchParams] = useSearchParams();
   const [fileUrl, setFileUrl] = useState(null);
   const [fileName, setFileName] = useState('3D Scan');
+  // Multi-file mode (study mode): array of { url, fileName, fileType }.
+  // null until resolved; empty array means "we tried but found nothing".
+  const [files, setFiles] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -55,6 +58,7 @@ export default function IOSViewerPage() {
   const filePath = searchParams.get('path');
   const queryName = searchParams.get('name');
   const fileType = searchParams.get('type') || 'stl';
+  const studyId = searchParams.get('study');
 
   // Memoize patient + scan so their object references stay stable across
   // renders. Without this, ModelViewer's `useEffect(..., [scan])` re-runs
@@ -77,7 +81,7 @@ export default function IOSViewerPage() {
   }), [fileId, patient.id, fileName]);
 
   useEffect(() => {
-    document.title = `${queryName || (isDemo ? 'Demo' : '3D Scan')} · aiHealth Imaging`;
+    document.title = `${queryName || (isDemo ? 'Demo' : (studyId ? 'Study' : '3D Scan'))} · aiHealth Imaging`;
 
     let cancelled = false;
     (async () => {
@@ -91,11 +95,25 @@ export default function IOSViewerPage() {
           // toggles + tools are designed for.
           if (cancelled) return;
           setFileUrl(null);
+          setFiles(null);
           setFileName('Demo Mesh');
+        } else if (studyId) {
+          // Multi-file study mode — load every STL/PLY/OBJ for the study.
+          const arr = await resolveStudyFiles(studyId);
+          if (cancelled) return;
+          setFiles(arr.map((f) => ({
+            url: f.url,
+            fileName: f.fileName,
+            fileType: f.fileKind,
+          })));
+          setFileUrl(null);
+          setFileName(`Case · ${arr.length} scan${arr.length !== 1 ? 's' : ''}`);
         } else {
+          // Legacy single-file mode
           const r = await resolveSignedUrl({ id: fileId, path: filePath });
           if (cancelled) return;
           setFileUrl(r.url);
+          setFiles(null);
           setFileName(r.fileName || queryName || '3D Scan');
         }
       } catch (err) {
@@ -107,7 +125,7 @@ export default function IOSViewerPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [fileId, filePath, queryName, isDemo]);
+  }, [fileId, filePath, queryName, isDemo, studyId]);
 
   if (loading) {
     return (
@@ -130,10 +148,11 @@ export default function IOSViewerPage() {
             <p className="text-[11px] text-muted font-mono break-all mt-1">{error}</p>
           </div>
           <div className="text-[11.5px] text-muted leading-relaxed mt-2">
-            This page expects either{' '}
-            <code className="text-accent font-mono">?id=&lt;file_id&gt;</code> or{' '}
-            <code className="text-accent font-mono">?path=&lt;bucket/key&gt;</code>{' '}
-            in the URL.
+            This page expects one of:{' '}
+            <code className="text-accent font-mono">?study=&lt;study_id&gt;</code>{' '}
+            (loads upper + lower + occlusion together),{' '}
+            <code className="text-accent font-mono">?id=&lt;file_id&gt;</code>, or{' '}
+            <code className="text-accent font-mono">?path=&lt;bucket/key&gt;</code>.
           </div>
           <div className="flex items-center gap-2 mt-2">
             <Link
@@ -176,6 +195,7 @@ export default function IOSViewerPage() {
         onClose={() => window.close()}
         fileUrl={fileUrl}
         fileType={fileType}
+        files={files}
       />
     </div>
   );

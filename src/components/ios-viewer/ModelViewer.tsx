@@ -113,6 +113,19 @@ function FileModel({
 }
 
 // Mock 3D Dental Model Component (fallback when no file)
+//
+// 2026-05-06 phase 2.5 fixes:
+// - Arches render persistently. Visibility toggles drive a smooth opacity
+//   lerp (~167ms) instead of unmounting the geometry. Hidden meshes
+//   stay raycastable so click handlers still resolve.
+// - onClick / onPointerOver / onPointerOut wired on each arch.
+// - Hover and selection produce subtle emissive feedback + scale lift,
+//   per Emil Kowalski's "feel right" framework + impeccable's motion-design
+//   100/300/500 rule (200-300ms for state changes, exponential easing).
+// - Removed the constant sine-wave oscillation. Idle motion is
+//   animation fatigue, not polish.
+// - Respects prefers-reduced-motion: lerp factor jumps to 1 so toggles
+//   are instant for vestibular-sensitive users.
 function DentalModel({
   viewerSettings,
   activeTool
@@ -122,86 +135,163 @@ function DentalModel({
 }) {
   const maxillaRef = useRef<THREE.Group>(null);
   const mandibleRef = useRef<THREE.Group>(null);
-  const occlusionRef = useRef<THREE.Group>(null);
 
-  useFrame((state) => {
-    if (maxillaRef.current) {
-      maxillaRef.current.rotation.y = Math.sin(state.clock.elapsedTime * 0.1) * 0.05;
-    }
-    if (mandibleRef.current) {
-      mandibleRef.current.rotation.y = Math.sin(state.clock.elapsedTime * 0.1) * 0.05;
-    }
+  const [hovered, setHovered] = useState<'maxilla' | 'mandible' | null>(null);
+  const [selected, setSelected] = useState<'maxilla' | 'mandible' | null>(null);
+
+  // Smooth opacity tracker per arch (current visual opacity, lerped each frame)
+  const maxillaOpacityRef = useRef(viewerSettings.maxillaVisible ? viewerSettings.maxillaOpacity / 100 : 0);
+  const mandibleOpacityRef = useRef(viewerSettings.mandibleVisible ? viewerSettings.mandibleOpacity / 100 : 0);
+
+  // Detect prefers-reduced-motion once
+  const reducedMotion = useRef(
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+
+  useFrame((_, delta) => {
+    // ~167ms feel under normal motion; instant under reduced-motion
+    const lerpAmt = reducedMotion.current ? 1 : Math.min(1, delta * 6);
+
+    const maxTarget = viewerSettings.maxillaVisible ? viewerSettings.maxillaOpacity / 100 : 0;
+    const manTarget = viewerSettings.mandibleVisible ? viewerSettings.mandibleOpacity / 100 : 0;
+
+    maxillaOpacityRef.current = THREE.MathUtils.lerp(maxillaOpacityRef.current, maxTarget, lerpAmt);
+    mandibleOpacityRef.current = THREE.MathUtils.lerp(mandibleOpacityRef.current, manTarget, lerpAmt);
+
+    const applyArchState = (
+      group: THREE.Group | null,
+      opacity: number,
+      isHover: boolean,
+      isSelect: boolean,
+    ) => {
+      if (!group) return;
+      group.traverse((c: any) => {
+        if (c.isMesh && c.material) {
+          c.material.transparent = true;
+          c.material.opacity = opacity;
+          // Subtle emissive lift for hover; stronger for selected
+          if (c.material.emissive) {
+            if (isSelect)      c.material.emissive.setHex(0x1a3a2a);
+            else if (isHover)  c.material.emissive.setHex(0x0e1a1a);
+            else               c.material.emissive.setHex(0x000000);
+          }
+        }
+      });
+      // Subtle scale lift — feels like a soft hover/select state without bounce
+      const scaleTarget = isSelect ? 1.025 : (isHover ? 1.012 : 1.0);
+      group.scale.lerp(new THREE.Vector3(scaleTarget, scaleTarget, scaleTarget), lerpAmt);
+    };
+
+    applyArchState(
+      maxillaRef.current,
+      maxillaOpacityRef.current,
+      hovered === 'maxilla',
+      selected === 'maxilla',
+    );
+    applyArchState(
+      mandibleRef.current,
+      mandibleOpacityRef.current,
+      hovered === 'mandible',
+      selected === 'mandible',
+    );
   });
+
+  // Pointer handlers — onClick toggles selection. Cursor change gives the
+  // affordance that the arch is interactive.
+  const onArchOver = (which: 'maxilla' | 'mandible') => (e: any) => {
+    e.stopPropagation();
+    setHovered(which);
+    if (typeof document !== 'undefined') document.body.style.cursor = 'pointer';
+  };
+  const onArchOut = (_which: 'maxilla' | 'mandible') => (e: any) => {
+    e.stopPropagation();
+    setHovered((h) => (h === _which ? null : h));
+    if (typeof document !== 'undefined') document.body.style.cursor = '';
+  };
+  const onArchClick = (which: 'maxilla' | 'mandible') => (e: any) => {
+    e.stopPropagation();
+    setSelected((cur) => (cur === which ? null : which));
+  };
 
   return (
     <group>
-      {/* Maxilla (Upper Jaw) */}
-      {viewerSettings.maxillaVisible && (
-        <group ref={maxillaRef} position={[0, 0.8, 0]}>
-          <mesh>
-            <sphereGeometry args={[1.2, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.3]} />
+      {/* Maxilla (Upper Jaw) — rendered always; visibility drives opacity lerp */}
+      <group
+        ref={maxillaRef}
+        position={[0, 0.8, 0]}
+        onPointerOver={onArchOver('maxilla')}
+        onPointerOut={onArchOut('maxilla')}
+        onClick={onArchClick('maxilla')}
+      >
+        <mesh>
+          <sphereGeometry args={[1.2, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.3]} />
+          <meshStandardMaterial
+            color="#e8a4a4"
+            transparent
+            opacity={viewerSettings.maxillaOpacity / 100}
+            roughness={0.6}
+          />
+        </mesh>
+        {[-0.8, -0.5, -0.2, 0.1, 0.4, 0.7].map((x, i) => (
+          <mesh key={`upper-tooth-${i}`} position={[x, 0.3, 0.8]}>
+            <boxGeometry args={[0.2, 0.4, 0.15]} />
             <meshStandardMaterial
-              color="#e8a4a4"
+              color="#f5f5dc"
               transparent
               opacity={viewerSettings.maxillaOpacity / 100}
-              roughness={0.6}
+              roughness={0.3}
             />
           </mesh>
-          {[-0.8, -0.5, -0.2, 0.1, 0.4, 0.7].map((x, i) => (
-            <mesh key={`upper-tooth-${i}`} position={[x, 0.3, 0.8]}>
-              <boxGeometry args={[0.2, 0.4, 0.15]} />
-              <meshStandardMaterial
-                color="#f5f5dc"
-                transparent
-                opacity={viewerSettings.maxillaOpacity / 100}
-                roughness={0.3}
-              />
-            </mesh>
-          ))}
-          {activeTool === 'occlusal' && (
-            <mesh position={[0, 0.55, 0.8]}>
-              <planeGeometry args={[2, 0.5]} />
-              <meshBasicMaterial color="#ff4444" transparent opacity={0.4 * (viewerSettings.maxillaOpacity / 100)} />
-            </mesh>
-          )}
-        </group>
-      )}
+        ))}
+        {activeTool === 'occlusal' && (
+          <mesh position={[0, 0.55, 0.8]}>
+            <planeGeometry args={[2, 0.5]} />
+            <meshBasicMaterial color="#ff4444" transparent opacity={0.4 * (viewerSettings.maxillaOpacity / 100)} />
+          </mesh>
+        )}
+      </group>
 
       {/* Mandible (Lower Jaw) */}
-      {viewerSettings.mandibleVisible && (
-        <group ref={mandibleRef} position={[0, -0.8, 0]}>
-          <mesh rotation={[Math.PI, 0, 0]}>
-            <sphereGeometry args={[1.2, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.3]} />
+      <group
+        ref={mandibleRef}
+        position={[0, -0.8, 0]}
+        onPointerOver={onArchOver('mandible')}
+        onPointerOut={onArchOut('mandible')}
+        onClick={onArchClick('mandible')}
+      >
+        <mesh rotation={[Math.PI, 0, 0]}>
+          <sphereGeometry args={[1.2, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.3]} />
+          <meshStandardMaterial
+            color="#e8a4a4"
+            transparent
+            opacity={viewerSettings.mandibleOpacity / 100}
+            roughness={0.6}
+          />
+        </mesh>
+        {[-0.8, -0.5, -0.2, 0.1, 0.4, 0.7].map((x, i) => (
+          <mesh key={`lower-tooth-${i}`} position={[x, -0.3, 0.8]}>
+            <boxGeometry args={[0.2, 0.4, 0.15]} />
             <meshStandardMaterial
-              color="#e8a4a4"
+              color="#f5f5dc"
               transparent
               opacity={viewerSettings.mandibleOpacity / 100}
-              roughness={0.6}
+              roughness={0.3}
             />
           </mesh>
-          {[-0.8, -0.5, -0.2, 0.1, 0.4, 0.7].map((x, i) => (
-            <mesh key={`lower-tooth-${i}`} position={[x, -0.3, 0.8]}>
-              <boxGeometry args={[0.2, 0.4, 0.15]} />
-              <meshStandardMaterial
-                color="#f5f5dc"
-                transparent
-                opacity={viewerSettings.mandibleOpacity / 100}
-                roughness={0.3}
-              />
-            </mesh>
-          ))}
-          {activeTool === 'occlusal' && (
-            <mesh position={[0, -0.55, 0.8]}>
-              <planeGeometry args={[2, 0.5]} />
-              <meshBasicMaterial color="#44ff44" transparent opacity={0.4 * (viewerSettings.mandibleOpacity / 100)} />
-            </mesh>
-          )}
-        </group>
-      )}
+        ))}
+        {activeTool === 'occlusal' && (
+          <mesh position={[0, -0.55, 0.8]}>
+            <planeGeometry args={[2, 0.5]} />
+            <meshBasicMaterial color="#44ff44" transparent opacity={0.4 * (viewerSettings.mandibleOpacity / 100)} />
+          </mesh>
+        )}
+      </group>
 
-      {/* Occlusion/Bite */}
+      {/* Occlusion/Bite — tool-driven overlay, conditional render is fine */}
       {viewerSettings.occlusionVisible && activeTool === 'occlusal' && (
-        <group ref={occlusionRef}>
+        <group>
           <mesh position={[-0.5, 0, 0.9]}>
             <sphereGeometry args={[0.08, 16, 16]} />
             <meshBasicMaterial color="#ff0000" transparent opacity={viewerSettings.occlusionOpacity / 100} />

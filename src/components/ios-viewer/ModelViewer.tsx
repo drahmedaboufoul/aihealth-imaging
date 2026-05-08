@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid, PerspectiveCamera, Line } from '@react-three/drei';
 import * as THREE from 'three';
 import type { Patient, Scan, ViewerSettings, ToolType, MouseSettings } from './types';
@@ -114,18 +114,16 @@ function FileModel({
 
 // Mock 3D Dental Model Component (fallback when no file)
 //
-// 2026-05-06 phase 2.5 fixes:
-// - Arches render persistently. Visibility toggles drive a smooth opacity
-//   lerp (~167ms) instead of unmounting the geometry. Hidden meshes
-//   stay raycastable so click handlers still resolve.
-// - onClick / onPointerOver / onPointerOut wired on each arch.
-// - Hover and selection produce subtle emissive feedback + scale lift,
-//   per Emil Kowalski's "feel right" framework + impeccable's motion-design
-//   100/300/500 rule (200-300ms for state changes, exponential easing).
-// - Removed the constant sine-wave oscillation. Idle motion is
-//   animation fatigue, not polish.
-// - Respects prefers-reduced-motion: lerp factor jumps to 1 so toggles
-//   are instant for vestibular-sensitive users.
+// Phase 2.5 batch (2026-05-06):
+// - Teeth follow a U-shaped arch curve (parametric ellipse), not a straight
+//   line. Looks like a real dental arch instead of fence posts.
+// - Persistent rendering + opacity lerp on visibility toggle.
+// - onClick / onPointerOver / onPointerOut wired to each arch.
+// - Hover: accent-blue emissive + scale 1.025. Selected: stronger
+//   accent emissive + scale 1.04. Per impeccable motion-design, exit
+//   animations are 75% of enter so deselect snaps faster.
+// - Removed sine-wave idle drift.
+// - Respects prefers-reduced-motion.
 function DentalModel({
   viewerSettings,
   activeTool
@@ -139,19 +137,22 @@ function DentalModel({
   const [hovered, setHovered] = useState<'maxilla' | 'mandible' | null>(null);
   const [selected, setSelected] = useState<'maxilla' | 'mandible' | null>(null);
 
-  // Smooth opacity tracker per arch (current visual opacity, lerped each frame)
   const maxillaOpacityRef = useRef(viewerSettings.maxillaVisible ? viewerSettings.maxillaOpacity / 100 : 0);
   const mandibleOpacityRef = useRef(viewerSettings.mandibleVisible ? viewerSettings.mandibleOpacity / 100 : 0);
 
-  // Detect prefers-reduced-motion once
   const reducedMotion = useRef(
     typeof window !== 'undefined' &&
     typeof window.matchMedia === 'function' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches
   );
 
+  // U-arch tooth positions (parametric ellipse around -π/3 to π/3 covering 7 teeth).
+  // a = lateral half-width; b = anteroposterior depth.
+  const archAngles = [...Array(7)].map((_, i) => -Math.PI / 3 + (Math.PI * 2 / 3) * (i / 6));
+  const archA = 0.85;
+  const archB = 0.7;
+
   useFrame((_, delta) => {
-    // ~167ms feel under normal motion; instant under reduced-motion
     const lerpAmt = reducedMotion.current ? 1 : Math.min(1, delta * 6);
 
     const maxTarget = viewerSettings.maxillaVisible ? viewerSettings.maxillaOpacity / 100 : 0;
@@ -171,151 +172,135 @@ function DentalModel({
         if (c.isMesh && c.material) {
           c.material.transparent = true;
           c.material.opacity = opacity;
-          // Subtle emissive lift for hover; stronger for selected
           if (c.material.emissive) {
-            if (isSelect)      c.material.emissive.setHex(0x1a3a2a);
-            else if (isHover)  c.material.emissive.setHex(0x0e1a1a);
+            // Accent blue (#5DA9E9 ≈ rgb 93, 169, 233) for clear feedback.
+            // Selected = stronger; hover = subtle.
+            if (isSelect)      c.material.emissive.setHex(0x1f4a78);
+            else if (isHover)  c.material.emissive.setHex(0x12325a);
             else               c.material.emissive.setHex(0x000000);
+            c.material.emissiveIntensity = isSelect ? 0.9 : (isHover ? 0.5 : 0);
           }
         }
       });
-      // Subtle scale lift — feels like a soft hover/select state without bounce
-      const scaleTarget = isSelect ? 1.025 : (isHover ? 1.012 : 1.0);
+      const scaleTarget = isSelect ? 1.04 : (isHover ? 1.025 : 1.0);
       group.scale.lerp(new THREE.Vector3(scaleTarget, scaleTarget, scaleTarget), lerpAmt);
     };
 
-    applyArchState(
-      maxillaRef.current,
-      maxillaOpacityRef.current,
-      hovered === 'maxilla',
-      selected === 'maxilla',
-    );
-    applyArchState(
-      mandibleRef.current,
-      mandibleOpacityRef.current,
-      hovered === 'mandible',
-      selected === 'mandible',
-    );
+    applyArchState(maxillaRef.current,  maxillaOpacityRef.current,  hovered === 'maxilla',  selected === 'maxilla');
+    applyArchState(mandibleRef.current, mandibleOpacityRef.current, hovered === 'mandible', selected === 'mandible');
   });
 
-  // Pointer handlers — onClick toggles selection. Cursor change gives the
-  // affordance that the arch is interactive.
-  const onArchOver = (which: 'maxilla' | 'mandible') => (e: any) => {
-    e.stopPropagation();
-    setHovered(which);
+  const onArchOver  = (which: 'maxilla' | 'mandible') => (e: any) => {
+    e.stopPropagation(); setHovered(which);
     if (typeof document !== 'undefined') document.body.style.cursor = 'pointer';
   };
-  const onArchOut = (_which: 'maxilla' | 'mandible') => (e: any) => {
-    e.stopPropagation();
-    setHovered((h) => (h === _which ? null : h));
+  const onArchOut   = (which: 'maxilla' | 'mandible') => (e: any) => {
+    e.stopPropagation(); setHovered((h) => (h === which ? null : h));
     if (typeof document !== 'undefined') document.body.style.cursor = '';
   };
   const onArchClick = (which: 'maxilla' | 'mandible') => (e: any) => {
-    e.stopPropagation();
-    setSelected((cur) => (cur === which ? null : which));
+    e.stopPropagation(); setSelected((cur) => (cur === which ? null : which));
   };
 
   return (
     <group>
-      {/* Maxilla (Upper Jaw) — rendered always; visibility drives opacity lerp */}
+      {/* Maxilla — curved arch with U-shaped teeth */}
       <group
         ref={maxillaRef}
-        position={[0, 0.8, 0]}
+        position={[0, 0.5, 0]}
         onPointerOver={onArchOver('maxilla')}
         onPointerOut={onArchOut('maxilla')}
         onClick={onArchClick('maxilla')}
       >
-        <mesh>
-          <sphereGeometry args={[1.2, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.3]} />
-          <meshStandardMaterial
-            color="#e8a4a4"
-            transparent
-            opacity={viewerSettings.maxillaOpacity / 100}
-            roughness={0.6}
-          />
+        {/* Palate dome */}
+        <mesh position={[0, 0.1, 0]}>
+          <sphereGeometry args={[0.95, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.35]} />
+          <meshStandardMaterial color="#e8a4a4" transparent opacity={1} roughness={0.6} />
         </mesh>
-        {[-0.8, -0.5, -0.2, 0.1, 0.4, 0.7].map((x, i) => (
-          <mesh key={`upper-tooth-${i}`} position={[x, 0.3, 0.8]}>
-            <boxGeometry args={[0.2, 0.4, 0.15]} />
-            <meshStandardMaterial
-              color="#f5f5dc"
-              transparent
-              opacity={viewerSettings.maxillaOpacity / 100}
-              roughness={0.3}
-            />
-          </mesh>
-        ))}
+        {/* Teeth along arch — 7 teeth from molar to molar */}
+        {archAngles.map((angle, i) => {
+          const x = archA * Math.sin(angle);
+          const z = archB * Math.cos(angle);
+          // Make molars (at extremes) larger than incisors (center)
+          const isMolar = Math.abs(i - 3) >= 2;
+          const w = isMolar ? 0.22 : 0.16;
+          const h = isMolar ? 0.32 : 0.4;
+          const d = isMolar ? 0.22 : 0.14;
+          return (
+            <mesh key={`upper-tooth-${i}`} position={[x, -0.15, z]} rotation={[0, -angle, 0]}>
+              <boxGeometry args={[w, h, d]} />
+              <meshStandardMaterial color="#f5f0e6" transparent opacity={1} roughness={0.3} />
+            </mesh>
+          );
+        })}
         {activeTool === 'occlusal' && (
-          <mesh position={[0, 0.55, 0.8]}>
-            <planeGeometry args={[2, 0.5]} />
-            <meshBasicMaterial color="#ff4444" transparent opacity={0.4 * (viewerSettings.maxillaOpacity / 100)} />
+          <mesh position={[0, -0.3, 0.6]}>
+            <ringGeometry args={[0.55, 0.85, 32]} />
+            <meshBasicMaterial color="#ff4444" transparent opacity={0.3} side={THREE.DoubleSide} />
           </mesh>
         )}
       </group>
 
-      {/* Mandible (Lower Jaw) */}
+      {/* Mandible — mirror of maxilla */}
       <group
         ref={mandibleRef}
-        position={[0, -0.8, 0]}
+        position={[0, -0.5, 0]}
         onPointerOver={onArchOver('mandible')}
         onPointerOut={onArchOut('mandible')}
         onClick={onArchClick('mandible')}
       >
-        <mesh rotation={[Math.PI, 0, 0]}>
-          <sphereGeometry args={[1.2, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.3]} />
-          <meshStandardMaterial
-            color="#e8a4a4"
-            transparent
-            opacity={viewerSettings.mandibleOpacity / 100}
-            roughness={0.6}
-          />
+        {/* Floor of mouth dome (flipped) */}
+        <mesh position={[0, -0.1, 0]} rotation={[Math.PI, 0, 0]}>
+          <sphereGeometry args={[0.95, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.35]} />
+          <meshStandardMaterial color="#e8a4a4" transparent opacity={1} roughness={0.6} />
         </mesh>
-        {[-0.8, -0.5, -0.2, 0.1, 0.4, 0.7].map((x, i) => (
-          <mesh key={`lower-tooth-${i}`} position={[x, -0.3, 0.8]}>
-            <boxGeometry args={[0.2, 0.4, 0.15]} />
-            <meshStandardMaterial
-              color="#f5f5dc"
-              transparent
-              opacity={viewerSettings.mandibleOpacity / 100}
-              roughness={0.3}
-            />
-          </mesh>
-        ))}
+        {archAngles.map((angle, i) => {
+          const x = archA * Math.sin(angle);
+          const z = archB * Math.cos(angle);
+          const isMolar = Math.abs(i - 3) >= 2;
+          const w = isMolar ? 0.22 : 0.16;
+          const h = isMolar ? 0.32 : 0.4;
+          const d = isMolar ? 0.22 : 0.14;
+          return (
+            <mesh key={`lower-tooth-${i}`} position={[x, 0.15, z]} rotation={[0, -angle, 0]}>
+              <boxGeometry args={[w, h, d]} />
+              <meshStandardMaterial color="#f5f0e6" transparent opacity={1} roughness={0.3} />
+            </mesh>
+          );
+        })}
         {activeTool === 'occlusal' && (
-          <mesh position={[0, -0.55, 0.8]}>
-            <planeGeometry args={[2, 0.5]} />
-            <meshBasicMaterial color="#44ff44" transparent opacity={0.4 * (viewerSettings.mandibleOpacity / 100)} />
+          <mesh position={[0, 0.3, 0.6]}>
+            <ringGeometry args={[0.55, 0.85, 32]} />
+            <meshBasicMaterial color="#44ff44" transparent opacity={0.3} side={THREE.DoubleSide} />
           </mesh>
         )}
       </group>
 
-      {/* Occlusion/Bite — tool-driven overlay, conditional render is fine */}
+      {/* Occlusion/Bite contact markers */}
       {viewerSettings.occlusionVisible && activeTool === 'occlusal' && (
         <group>
-          <mesh position={[-0.5, 0, 0.9]}>
-            <sphereGeometry args={[0.08, 16, 16]} />
-            <meshBasicMaterial color="#ff0000" transparent opacity={viewerSettings.occlusionOpacity / 100} />
-          </mesh>
-          <mesh position={[0.2, 0, 0.9]}>
-            <sphereGeometry args={[0.06, 16, 16]} />
-            <meshBasicMaterial color="#ffff00" transparent opacity={viewerSettings.occlusionOpacity / 100} />
-          </mesh>
-          <mesh position={[0.6, 0, 0.9]}>
-            <sphereGeometry args={[0.05, 16, 16]} />
-            <meshBasicMaterial color="#00ff00" transparent opacity={viewerSettings.occlusionOpacity / 100} />
-          </mesh>
+          {archAngles.filter((_, i) => i % 2 === 0).map((angle, i) => {
+            const x = archA * Math.sin(angle) * 0.95;
+            const z = archB * Math.cos(angle) * 0.95;
+            return (
+              <mesh key={`bite-${i}`} position={[x, 0, z]}>
+                <sphereGeometry args={[0.06, 16, 16]} />
+                <meshBasicMaterial color="#ff0000" transparent opacity={viewerSettings.occlusionOpacity / 100} />
+              </mesh>
+            );
+          })}
         </group>
       )}
 
       {/* Measurement Lines */}
       {activeTool === 'measure' && (
         <group>
-          <Line points={[[-0.5, 0.5, 1], [0.5, 0.5, 1]]} color="#0066ff" lineWidth={2} />
-          <mesh position={[-0.5, 0.5, 1]}>
+          <Line points={[[-0.5, 0, 0.5], [0.5, 0, 0.5]]} color="#0066ff" lineWidth={2} />
+          <mesh position={[-0.5, 0, 0.5]}>
             <sphereGeometry args={[0.05, 16, 16]} />
             <meshBasicMaterial color="#0066ff" />
           </mesh>
-          <mesh position={[0.5, 0.5, 1]}>
+          <mesh position={[0.5, 0, 0.5]}>
             <sphereGeometry args={[0.05, 16, 16]} />
             <meshBasicMaterial color="#0066ff" />
           </mesh>
@@ -323,6 +308,82 @@ function DentalModel({
       )}
     </group>
   );
+}
+
+// CameraAutoFit — frames whatever is in the scene to fit the camera frustum.
+// Runs once on mount + once when fileUrl/scan changes. Computes the bounding
+// box of the visible meshes, finds the bounding sphere, and positions the
+// camera at the right distance along +Z so the mesh fills ~80% of the view.
+function CameraAutoFit({ trigger }: { trigger: any }) {
+  const { camera, scene, controls } = useThree();
+  useEffect(() => {
+    // Defer one frame to let geometry mount + materials settle
+    const id = requestAnimationFrame(() => {
+      const box = new THREE.Box3();
+      // Only fit to actual mesh content (skip lights, grid, helpers)
+      scene.traverse((o: any) => {
+        if (o.isMesh && o.geometry) {
+          o.geometry.computeBoundingBox();
+          const childBox = o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld);
+          box.union(childBox);
+        }
+      });
+      if (box.isEmpty()) return;
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const sphere = new THREE.Sphere();
+      box.getBoundingSphere(sphere);
+      const radius = sphere.radius;
+
+      const fov = (camera as THREE.PerspectiveCamera).fov * (Math.PI / 180);
+      const distance = (radius / Math.sin(fov / 2)) * 1.4; // 1.4 = ~70% fill, slight margin
+
+      const dir = new THREE.Vector3(0, 0, 1);
+      camera.position.copy(center.clone().add(dir.multiplyScalar(distance)));
+      camera.lookAt(center);
+      camera.near = Math.max(0.01, distance / 100);
+      camera.far  = distance * 100;
+      camera.updateProjectionMatrix();
+
+      if (controls && (controls as any).target) {
+        (controls as any).target.copy(center);
+        (controls as any).update?.();
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [trigger, camera, scene, controls]);
+  return null;
+}
+
+// ViewPresets — fly the camera to standard orientations. Values match
+// exocad's view-button conventions (front/back along Z, right/left along X,
+// occlusal/from-below along Y). Animation tweens position + target over
+// 350ms with quart-out easing for a refined feel.
+function flyCameraTo(
+  camera: THREE.Camera,
+  controls: any,
+  targetPos: THREE.Vector3,
+  lookAt: THREE.Vector3 = new THREE.Vector3(0, 0, 0),
+  durationMs = 350,
+) {
+  const startPos = camera.position.clone();
+  const startTarget = controls?.target ? controls.target.clone() : new THREE.Vector3(0, 0, 0);
+  const t0 = performance.now();
+  const easeOutQuart = (t: number) => 1 - Math.pow(1 - t, 4);
+
+  const step = () => {
+    const t = Math.min(1, (performance.now() - t0) / durationMs);
+    const k = easeOutQuart(t);
+    camera.position.lerpVectors(startPos, targetPos, k);
+    if (controls?.target) {
+      controls.target.lerpVectors(startTarget, lookAt, k);
+      controls.update?.();
+    } else {
+      camera.lookAt(lookAt);
+    }
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 // Loading Screen Component
@@ -554,11 +615,11 @@ export function ModelViewer({
 
         {/* 3D Canvas */}
         <div className="flex-1 relative">
-          <Canvas shadows>
-            <PerspectiveCamera makeDefault position={[0, 0, 5]} fov={50} />
-            <ambientLight intensity={0.6} />
-            <directionalLight position={[5, 5, 5]} intensity={0.8} castShadow />
-            <directionalLight position={[-5, -5, -5]} intensity={0.3} />
+          <Canvas shadows dpr={[1, 2]}>
+            <PerspectiveCamera makeDefault position={[0, 0, 4]} fov={45} />
+            <ambientLight intensity={0.55} />
+            <directionalLight position={[5, 5, 5]} intensity={0.85} castShadow />
+            <directionalLight position={[-5, -5, -5]} intensity={0.25} />
 
             {fileUrl ? (
               <FileModel
@@ -586,11 +647,22 @@ export function ModelViewer({
               />
             )}
 
+            <CameraAutoFit trigger={fileUrl || 'demo'} />
+
             <OrbitControls
               ref={controlsRef}
+              makeDefault
               enablePan={true}
               enableZoom={true}
               enableRotate={true}
+              enableDamping={true}
+              dampingFactor={0.08}
+              rotateSpeed={0.6}
+              zoomSpeed={0.8}
+              panSpeed={0.7}
+              screenSpacePanning={true}
+              minDistance={1}
+              maxDistance={50}
               mouseButtons={{
                 LEFT: mouseSettings.leftRotation ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN,
                 MIDDLE: THREE.MOUSE.DOLLY,
@@ -598,6 +670,36 @@ export function ModelViewer({
               }}
             />
           </Canvas>
+
+          {/* View preset chips — exocad-style camera presets. Animated 350ms ease-out-quart. */}
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 bg-white/95 backdrop-blur-sm rounded-full shadow-md px-1 py-0.5 border border-gray-200">
+            {[
+              { label: 'Front',    pos: [0, 0, 4]   },
+              { label: 'Right',    pos: [4, 0, 0]   },
+              { label: 'Top',      pos: [0, 4, 0.001] },  // tiny Z to keep up vector valid
+              { label: 'Left',     pos: [-4, 0, 0]  },
+              { label: 'Back',     pos: [0, 0, -4]  },
+              { label: 'Bottom',   pos: [0, -4, 0.001] },
+            ].map(preset => (
+              <button
+                key={preset.label}
+                type="button"
+                onClick={() => {
+                  const cam = controlsRef.current?.object;
+                  if (!cam) return;
+                  flyCameraTo(
+                    cam,
+                    controlsRef.current,
+                    new THREE.Vector3(...(preset.pos as [number, number, number])),
+                    new THREE.Vector3(0, 0, 0),
+                  );
+                }}
+                className="px-2.5 py-1 text-[11px] font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-100 rounded-full transition-colors"
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
 
           {/* Right Toolbar */}
           <div className="absolute right-4 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-2">

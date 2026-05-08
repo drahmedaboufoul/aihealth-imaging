@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { detectScanRole, ROLE_STYLE, ROLE_TO_SETTING } from './utils/roleDetection';
+import { computeAutoOrient } from './utils/autoOrient';
 
 export interface MeshFile {
   url: string;
@@ -32,6 +33,10 @@ export interface ViewerSettingsLite {
   mandibleOpacity: number;
   occlusionVisible: boolean;
   occlusionOpacity: number;
+  /** Optional — when set to a role, ONLY meshes of that role render. */
+  isolatedRole?: 'maxilla' | 'mandible' | 'occlusion' | null;
+  /** When false, skip the PCA auto-orient. Default true. */
+  autoOrient?: boolean;
 }
 
 interface LoadedMesh {
@@ -120,10 +125,27 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onError }: Mul
       .then((results) => {
         if (cancelled) return;
         const loaded = results.filter(Boolean) as LoadedMesh[];
+
+        // Auto-orient via PCA on the combined point cloud, applied uniformly
+        // to all meshes so upper + lower stay registered. Skip if explicitly
+        // disabled. Geometry is mutated in place — fine because each load
+        // produces fresh BufferGeometry instances.
+        if ((viewerSettings.autoOrient ?? true) && loaded.length > 0) {
+          const { transform, confident } = computeAutoOrient(loaded.map((m) => m.geometry));
+          if (confident) {
+            for (const m of loaded) {
+              m.geometry.applyMatrix4(transform);
+              m.geometry.computeVertexNormals();
+              m.geometry.computeBoundingBox();
+            }
+          }
+        }
+
         setMeshes(loaded);
       });
 
     return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files, onError]);
 
   // Compute centered, aggregate bounds across all loaded meshes; recenter the
@@ -174,9 +196,14 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onError }: Mul
     <group ref={groupRef} position={groupOffset}>
       {meshes.map((m, idx) => {
         const setting = ROLE_TO_SETTING[m.role];
-        const visible = (viewerSettings as any)[setting.visible] ?? true;
+        const baseVisible = (viewerSettings as any)[setting.visible] ?? true;
         const opacityPct = (viewerSettings as any)[setting.opacity] ?? 100;
         const style = ROLE_STYLE[m.role];
+
+        // Per-mesh isolate: when an isolatedRole is active, hide everything
+        // that doesn't match (regardless of the per-role visibility toggle).
+        const isolated = viewerSettings.isolatedRole;
+        const visible = isolated ? (m.role === isolated) : baseVisible;
 
         return (
           <mesh

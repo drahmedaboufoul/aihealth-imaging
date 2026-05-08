@@ -772,6 +772,41 @@ export function ModelViewer({
                 </button>
               </div>
 
+              {/* Isolate row — quick way to focus on one role without
+                   toggling each visibility flag manually. Only meaningful
+                   in multi-mesh study mode; harmless otherwise. */}
+              {isMultiFile && (
+                <div className="mb-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 mb-1.5">
+                    Isolate
+                  </div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {([
+                      { key: null,         label: 'All' },
+                      { key: 'maxilla',    label: 'Up' },
+                      { key: 'mandible',   label: 'Low' },
+                      { key: 'occlusion',  label: 'Bite' },
+                    ] as const).map((opt) => {
+                      const active = (viewerSettings.isolatedRole ?? null) === opt.key;
+                      return (
+                        <button
+                          key={String(opt.key)}
+                          onClick={() => onUpdateSettings({ isolatedRole: opt.key })}
+                          className={`text-[11px] font-medium py-1.5 rounded transition-colors ${
+                            active
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          }`}
+                          title={opt.key ? `Show only ${opt.label}` : 'Show all meshes'}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Maxilla Control */}
               <div className="mb-4">
                 <div className="flex items-center justify-between mb-2">

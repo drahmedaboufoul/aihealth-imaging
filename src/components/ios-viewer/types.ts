@@ -21,6 +21,8 @@ export interface Scan {
 }
 
 // 3D Viewer Types
+export type IsolatedRole = 'maxilla' | 'mandible' | 'occlusion' | null;
+
 export interface ViewerSettings {
   maxillaVisible: boolean;
   maxillaOpacity: number;
@@ -29,6 +31,10 @@ export interface ViewerSettings {
   occlusionVisible: boolean;
   occlusionOpacity: number;
   showGrid: boolean;
+  /** When non-null, ONLY meshes of this role render (used by Isolate buttons). */
+  isolatedRole?: IsolatedRole;
+  /** When false, skip PCA auto-orient on load. Defaults to true. */
+  autoOrient?: boolean;
 }
 
 export type ToolType = 'none' | 'measure' | 'occlusal' | 'analysis';

@@ -675,9 +675,17 @@ export function ModelViewer({
               />
             )}
 
-            {/* MultiMeshModel does its own auto-frame across the whole case;
-                 only invoke CameraAutoFit for the legacy single-file/demo paths. */}
-            {!isMultiFile && <CameraAutoFit trigger={fileUrl || 'demo'} />}
+            {/* CameraAutoFit fires on mount + when its trigger value changes.
+                 In multi-file mode we trigger on the layer count (which changes
+                 from 0 -> N as the meshes finish loading). Single-file mode keeps
+                 firing on fileUrl change, demo mode on the constant 'demo'. */}
+            <CameraAutoFit
+              trigger={
+                isMultiFile
+                  ? `multi-${viewerSettings.meshLayers?.length || 0}`
+                  : (fileUrl || 'demo')
+              }
+            />
 
             <OrbitControls
               ref={controlsRef}

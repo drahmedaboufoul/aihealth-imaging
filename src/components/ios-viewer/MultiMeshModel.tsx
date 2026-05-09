@@ -15,7 +15,6 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { detectScanRole, ROLE_STYLE, ROLE_TO_SETTING } from './utils/roleDetection';
 import { computeAutoOrient } from './utils/autoOrient';
@@ -152,7 +151,6 @@ function buildLayerLabels(meshes: LoadedMesh[]): MeshLayer[] {
 export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady, onError }: MultiMeshModelProps) {
   const [meshes, setMeshes] = useState<LoadedMesh[]>([]);
   const groupRef = useRef<THREE.Group>(null);
-  const { camera } = useThree();
 
   // Load all files in parallel
   useEffect(() => {
@@ -209,64 +207,19 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
     return box;
   }, [meshes]);
 
-  // Pull the controls instance r3f registers when <OrbitControls makeDefault />
-  // mounts. We need it so we can sync .target to the model centre (orbiting
-  // around the wrong point makes the case fly out of view on first drag).
-  const controls = useThree((state) => state.controls) as any;
-
-  // Auto-frame camera once everything is loaded.
+  // No more auto-frame here — that's now handled by ModelViewer's
+  // CameraAutoFit, which defers to the next animation frame, traverses the
+  // actual mounted scene for bounds, and calls controls.update() with
+  // proper timing. My previous in-effect framing was racing with the
+  // OrbitControls mount and the meshes' first paint, leaving the user
+  // staring at an empty viewport on first load.
   //
-  // Frame the IN-PLANE size (X = mesial-distal, Z = buccal-lingual after PCA
-  // orient). The Y axis is the small occlusal-gingival thickness — including
-  // it pulls the camera too far.
-  //
-  // First-load goal: "anterior view, moderate size, dead-centre on screen".
-  // - Camera at (0, slight-up, +Z) with NO orbit offset so the user sees the
-  //   labial / occlusal surface front-on, not at a 3/4 angle.
-  // - Distance computed from FOV so the arch fills ~80% of the viewport
-  //   horizontally (1.2× padding instead of 1.6× to stop "feels too far").
-  // - OrbitControls.target snapped to the model centre and update() called
-  //   so subsequent orbits pivot around the case, not the world origin.
+  // We still report bounds via onLoaded so the parent knows when content
+  // is ready (used elsewhere if needed).
   useEffect(() => {
     if (!groupBounds || meshes.length === 0) return;
-    const center = new THREE.Vector3();
-    const size = new THREE.Vector3();
-    // Geometries were already centred at world origin via groupOffset, so
-    // use the world-space (origin-centred) bounds for camera math.
-    groupBounds.getCenter(center);
-    groupBounds.getSize(size);
-    const targetWorld = new THREE.Vector3(0, 0, 0); // groupOffset puts mesh centre here
-
-    if (camera instanceof THREE.PerspectiveCamera) {
-      const fovRad = (camera.fov * Math.PI) / 180;
-      const halfTan = Math.tan(fovRad / 2);
-      const inPlaneMax = Math.max(size.x, size.z, 1e-3);
-      const fitDist = (inPlaneMax / 2) / halfTan;
-      const dist = fitDist * 1.2; // moderate framing — arch fills ~80% width
-
-      // Anterior view: looking from +Z toward origin, with a small downward
-      // tilt (camera lifted by 20% of arch height) so the occlusal surface
-      // is visible without obscuring the labial faces.
-      camera.position.set(0, size.y * 0.2, dist);
-      camera.up.set(0, 1, 0);
-      camera.lookAt(targetWorld);
-      // Near/far scale with bounding sphere so user can zoom in close on a
-      // tooth or out to a wide overview without near-plane clipping.
-      const radius = Math.max(size.length() / 2, 1);
-      camera.near = Math.max(0.01, radius * 0.001);
-      camera.far  = radius * 200;
-      camera.updateProjectionMatrix();
-
-      // Sync orbit pivot. Without this the controls stay targeted at world
-      // origin (often correct here, but explicit + .update() is what makes
-      // the change visible immediately and stops first-drag jumps).
-      if (controls?.target) {
-        controls.target.copy(targetWorld);
-        controls.update?.();
-      }
-    }
     onLoaded?.({ count: meshes.length, bounds: groupBounds });
-  }, [groupBounds, meshes.length, camera, controls, onLoaded]);
+  }, [groupBounds, meshes.length, onLoaded]);
 
   // Group-level offset so meshes render around origin.
   // IMPORTANT: this useMemo MUST run before the early-return below so the

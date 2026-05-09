@@ -8,8 +8,10 @@ import ViewerStub from './components/ViewerStub';
 
 // IOS viewer is heavy (Three.js + react-three-fiber) — lazy-load it
 const IOSViewerPage = lazy(() => import('./pages/IOSViewerPage'));
-// DICOM viewer is medium-weight (dicom-parser ~100KB) — lazy too
+// DICOM viewer (Cornerstone3D + WASM codecs) — heavy, lazy
 const DicomViewerPage = lazy(() => import('./pages/DicomViewerPage'));
+// CBCT viewer (volume rendering + MPR) — heaviest, lazy
+const CBCTViewerPage = lazy(() => import('./pages/CBCTViewerPage'));
 
 function ViewerLoader() {
   return (
@@ -46,7 +48,14 @@ export default function App() {
         }
       />
       {/* CBCT volume — still stub, needs Cornerstone3D + volume rendering */}
-      <Route path="/viewer/cbct" element={<ViewerStub kind="cbct" />} />
+      <Route
+        path="/viewer/cbct"
+        element={
+          <Suspense fallback={<ViewerLoader />}>
+            <CBCTViewerPage />
+          </Suspense>
+        }
+      />
 
       {/* Backwards-compat alias for the EMR's old /cbct-viewer URL */}
       <Route path="/cbct-viewer" element={<Navigate to="/viewer/cbct" replace />} />

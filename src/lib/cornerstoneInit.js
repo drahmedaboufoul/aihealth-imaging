@@ -16,6 +16,7 @@
 import * as cornerstone from '@cornerstonejs/core';
 import * as cornerstoneTools from '@cornerstonejs/tools';
 import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
+import * as streamingVolumeLoader from '@cornerstonejs/streaming-image-volume-loader';
 import dicomParser from 'dicom-parser';
 
 let initialized = false;
@@ -66,6 +67,14 @@ export async function initCornerstone() {
   cornerstone.imageLoader.registerImageLoader(
     'wadors',
     dicomImageLoader.wadors.loadImage,
+  );
+
+  // Register the streaming image volume loader for CBCT/CT volume rendering.
+  // This wraps the regular image loader, decoding slices into a 3D voxel
+  // buffer that Cornerstone's volume viewports can sample for MPR + VR.
+  cornerstone.volumeLoader.registerVolumeLoader(
+    'cornerstoneStreamingImageVolume',
+    streamingVolumeLoader.cornerstoneStreamingImageVolumeLoader,
   );
 
   initialized = true;

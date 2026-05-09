@@ -1,78 +1,38 @@
 /*
- * cornerstoneInit — one-time Cornerstone3D + dicom-image-loader bootstrap.
+ * cornerstoneInit — one-time Cornerstone3D 4.x bootstrap.
  *
- * Cornerstone3D's `init` is global state. Call this once at the top of any
- * page that uses a RenderingEngine + StackViewport. Repeat calls are no-ops
- * thanks to the `initialized` guard.
+ * Cornerstone3D 4.x ships the streaming volume loader inside @cornerstonejs/core
+ * (no separate package), and @cornerstonejs/dicom-image-loader 4.x has its own
+ * `init()` that handles WASM codec setup automatically. Net result vs 1.x:
+ * less boilerplate, no more SAB/transfer races on the volume path.
  *
- * Why we need it: the V1 dicom-parser-based viewer can't decode compressed
- * pixel data (JPEG 2000 Lossless = transfer syntax 1.2.840.10008.1.2.4.90,
- * which is what our CBCT machine emits). Cornerstone's dicom-image-loader
- * bundles WASM codecs for libjpeg-turbo, charls (JPEG-LS), openjpeg
- * (JPEG-2000), and CharLS — that handles every transfer syntax we'll see
- * in clinical practice.
+ * Call this once at the top of any page that uses a RenderingEngine. Repeat
+ * calls are no-ops thanks to the `initialized` guard.
  */
 
-import * as cornerstone from '@cornerstonejs/core';
-import * as cornerstoneTools from '@cornerstonejs/tools';
-import dicomImageLoader from '@cornerstonejs/dicom-image-loader';
-import * as streamingVolumeLoader from '@cornerstonejs/streaming-image-volume-loader';
-import dicomParser from 'dicom-parser';
+import { init as csInit, imageLoader, volumeLoader, Enums, RenderingEngine, getRenderingEngine, metaData, eventTarget, cache } from '@cornerstonejs/core';
+import { init as toolsInit, addTool, ToolGroupManager, WindowLevelTool, PanTool, ZoomTool, StackScrollTool, TrackballRotateTool, CrosshairsTool, Enums as toolsEnums, utilities as toolsUtilities } from '@cornerstonejs/tools';
+import { init as dicomImageLoaderInit, wadouri, wadors } from '@cornerstonejs/dicom-image-loader';
 
 let initialized = false;
 
 export async function initCornerstone() {
   if (initialized) return;
 
-  await cornerstone.init();
-  await cornerstoneTools.init();
+  // Core init — registers the default streaming-image volume loader, sets up
+  // GPU detection, allocates the rendering engine cache.
+  await csInit();
+  // Tools init — required before adding any tools to a tool group.
+  await toolsInit();
+  // dicom-image-loader init — sets up the WASM codec workers (libjpeg-turbo,
+  // charls/JPEG-LS, openjpeg/JPEG-2000) and registers them with cornerstone.
+  // In 4.x this also handles SAB / non-SAB modes transparently.
+  await dicomImageLoaderInit();
 
-  // Wire dicom-image-loader's externals.
-  dicomImageLoader.external.cornerstone = cornerstone;
-  dicomImageLoader.external.dicomParser = dicomParser;
-
-  // Configure image loader. The WASM decoders are bundled with the loader
-  // and lazy-loaded on first use of a compressed transfer syntax.
-  //
-  // useWebWorkers: false — main-thread decode. The web-worker decode path
-  // in @cornerstonejs/dicom-image-loader 1.77 has a known race when paired
-  // with the streaming volume loader + SAB: the worker transfers its
-  // decoded ArrayBuffer back to main, then the volume loader tries to
-  // re-transfer it to a second worker, hitting:
-  //   DataCloneError: An ArrayBuffer is detached and could not be cloned
-  // Disabling workers does mean a 400-slice CBCT decode runs on the main
-  // thread (~5-10s of UI jank). Acceptable for clinical use; the proper
-  // fix is upstream in cornerstone — track in the dicom-image-loader 2.x
-  // upgrade path.
-  dicomImageLoader.configure({
-    useWebWorkers: false,
-    decodeConfig: {
-      convertFloatPixelDataToInt: false,
-      use16BitDataType: true,
-    },
-    beforeSend: (xhr) => {
-      // Signed Supabase URLs are pre-authenticated; nothing extra to add.
-    },
-  });
-
-  // Register image loader scheme. dicom-image-loader handles wadouri: and
-  // wadors: schemes; we'll use wadouri: with our pre-signed Supabase URLs.
-  cornerstone.imageLoader.registerImageLoader(
-    'wadouri',
-    dicomImageLoader.wadouri.loadImage,
-  );
-  cornerstone.imageLoader.registerImageLoader(
-    'wadors',
-    dicomImageLoader.wadors.loadImage,
-  );
-
-  // Register the streaming image volume loader for CBCT/CT volume rendering.
-  // This wraps the regular image loader, decoding slices into a 3D voxel
-  // buffer that Cornerstone's volume viewports can sample for MPR + VR.
-  cornerstone.volumeLoader.registerVolumeLoader(
-    'cornerstoneStreamingImageVolume',
-    streamingVolumeLoader.cornerstoneStreamingImageVolumeLoader,
-  );
+  // Register the wadouri / wadors schemes so cornerstone can dispatch
+  // to dicom-image-loader for our pre-signed Supabase storage URLs.
+  imageLoader.registerImageLoader('wadouri', wadouri.loadImage);
+  imageLoader.registerImageLoader('wadors', wadors.loadImage);
 
   initialized = true;
 }
@@ -86,4 +46,28 @@ export function imageIdFromSignedUrl(signedUrl) {
   return `wadouri:${signedUrl}`;
 }
 
-export { cornerstone, cornerstoneTools, dicomImageLoader };
+// Re-export the bits the viewer pages need so they don't have to know about
+// the underlying package layout (or worry about the v1 -> v4 migration).
+export const cornerstone = {
+  Enums,
+  RenderingEngine,
+  getRenderingEngine,
+  imageLoader,
+  volumeLoader,
+  metaData,
+  eventTarget,
+  cache,
+};
+
+export const cornerstoneTools = {
+  addTool,
+  ToolGroupManager,
+  WindowLevelTool,
+  PanTool,
+  ZoomTool,
+  StackScrollTool,           // v4 rename: was StackScrollMouseWheelTool
+  TrackballRotateTool,
+  CrosshairsTool,             // v4 ships synchronized MPR crosshairs
+  Enums: toolsEnums,
+  utilities: toolsUtilities,
+};

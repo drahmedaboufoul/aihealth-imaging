@@ -160,14 +160,14 @@ export default function DicomViewerPage() {
           cornerstoneTools.WindowLevelTool,
           cornerstoneTools.PanTool,
           cornerstoneTools.ZoomTool,
-          cornerstoneTools.StackScrollMouseWheelTool,
+          cornerstoneTools.StackScrollTool,
         ];
         for (const T of tools) cornerstoneTools.addTool(T);
 
         toolGroup.addTool(cornerstoneTools.WindowLevelTool.toolName);
         toolGroup.addTool(cornerstoneTools.PanTool.toolName);
         toolGroup.addTool(cornerstoneTools.ZoomTool.toolName);
-        toolGroup.addTool(cornerstoneTools.StackScrollMouseWheelTool.toolName);
+        toolGroup.addTool(cornerstoneTools.StackScrollTool.toolName);
 
         // Mouse bindings — radiology convention:
         //   right-drag  = window/level
@@ -183,7 +183,7 @@ export default function DicomViewerPage() {
         toolGroup.setToolActive(cornerstoneTools.ZoomTool.toolName, {
           bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
         });
-        toolGroup.setToolActive(cornerstoneTools.StackScrollMouseWheelTool.toolName);
+        toolGroup.setToolActive(cornerstoneTools.StackScrollTool.toolName);
 
         toolGroup.addViewport(VIEWPORT_ID, RENDERING_ENGINE_ID);
 

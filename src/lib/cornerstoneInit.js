@@ -33,28 +33,25 @@ export async function initCornerstone() {
 
   // Configure image loader. The WASM decoders are bundled with the loader
   // and lazy-loaded on first use of a compressed transfer syntax.
+  //
+  // useWebWorkers: false — main-thread decode. The web-worker decode path
+  // in @cornerstonejs/dicom-image-loader 1.77 has a known race when paired
+  // with the streaming volume loader + SAB: the worker transfers its
+  // decoded ArrayBuffer back to main, then the volume loader tries to
+  // re-transfer it to a second worker, hitting:
+  //   DataCloneError: An ArrayBuffer is detached and could not be cloned
+  // Disabling workers does mean a 400-slice CBCT decode runs on the main
+  // thread (~5-10s of UI jank). Acceptable for clinical use; the proper
+  // fix is upstream in cornerstone — track in the dicom-image-loader 2.x
+  // upgrade path.
   dicomImageLoader.configure({
-    useWebWorkers: true,
+    useWebWorkers: false,
     decodeConfig: {
       convertFloatPixelDataToInt: false,
       use16BitDataType: true,
     },
     beforeSend: (xhr) => {
       // Signed Supabase URLs are pre-authenticated; nothing extra to add.
-    },
-  });
-
-  // Web worker pool — keep it small to avoid spawning more than the browser
-  // can handle on lower-end machines.
-  const maxWebWorkers = Math.max(1, Math.min(navigator.hardwareConcurrency || 1, 4));
-  dicomImageLoader.webWorkerManager.initialize({
-    maxWebWorkers,
-    startWebWorkersOnDemand: true,
-    taskConfiguration: {
-      decodeTask: {
-        initializeCodecsOnStartup: false,
-        strict: false,
-      },
     },
   });
 

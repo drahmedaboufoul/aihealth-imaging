@@ -276,20 +276,26 @@ async function renderFromNifti({
 
 /**
  * Tools that take over the primary (left-click) action when the user
- * activates them from the toolbar. These are mutually exclusive — only
- * one of these may be bound to Primary at a time. Crosshair is the
- * default; selecting another swaps it on Primary and parks crosshair on
- * a side button (Aux, the middle-mouse).
+ * activates them from the toolbar. The values must be the actual
+ * Cornerstone3D toolName property (without the 'Tool' suffix — e.g.
+ * `CrosshairsTool.toolName === 'Crosshairs'`). Hardcoding the wrong
+ * string silently breaks setToolActive/setToolPassive at runtime.
+ *
+ * We populate this from cornerstoneTools.* references in initPrimaryToolMap()
+ * so it stays in lockstep with whatever Cornerstone version is bundled.
  */
-const PRIMARY_TOOLS = {
-  crosshair:    'CrosshairsTool',
-  length:       'Length',
-  angle:        'Angle',
-  bidirectional:'Bidirectional',
-  probe:        'Probe',
-  pan:          'Pan',
-  zoom:         'Zoom',
-};
+let PRIMARY_TOOLS = {};
+function initPrimaryToolMap() {
+  PRIMARY_TOOLS = {
+    crosshair:     cornerstoneTools.CrosshairsTool.toolName,
+    length:        cornerstoneTools.LengthTool.toolName,
+    angle:         cornerstoneTools.AngleTool.toolName,
+    bidirectional: cornerstoneTools.BidirectionalTool.toolName,
+    probe:         cornerstoneTools.ProbeTool.toolName,
+    pan:           cornerstoneTools.PanTool.toolName,
+    zoom:          cornerstoneTools.ZoomTool.toolName,
+  };
+}
 
 /**
  * Build the MPR + 3D tool groups + VOI synchronizer. Shared between the
@@ -297,6 +303,9 @@ const PRIMARY_TOOLS = {
  * identical interaction.
  */
 function setupCbctToolGroups(engine) {
+  // Initialize the primary-tool map from current Cornerstone references
+  // so we always use the correct internal toolNames.
+  initPrimaryToolMap();
   try { cornerstoneTools.ToolGroupManager.destroyToolGroup(TOOL_GROUP_MPR_ID); } catch {}
   try { cornerstoneTools.ToolGroupManager.destroyToolGroup(TOOL_GROUP_3D_ID); } catch {}
   const mprGroup = cornerstoneTools.ToolGroupManager.createToolGroup(TOOL_GROUP_MPR_ID);
@@ -1013,24 +1022,61 @@ export default function CBCTViewerPage() {
 
   return (
     <div className="h-screen w-screen flex flex-col" style={{ backgroundColor: SHELL_BG, color: '#cdd2d8' }}>
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2 border-b" style={{ borderColor: '#1d2128' }}>
-        <button
-          onClick={() => window.close() || navigate('/')}
-          className="text-sm px-2 py-1 rounded hover:bg-white/5 flex items-center gap-1.5"
-        >
-          <ArrowLeft size={14} /> Close
-        </button>
-        <div className="text-sm font-semibold tracking-wide flex items-center gap-2">
-          <Box size={14} className="text-amber-500" />
-          CBCT Viewer
-          <span className="ml-2 text-[11px] text-gray-400 font-normal">MPR + 3D</span>
+      {/* Header — Close + View-mode tabs + branding */}
+      <div className="flex items-center justify-between px-3 py-1.5 border-b" style={{ borderColor: '#1d2128' }}>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => window.close() || navigate('/')}
+            className="text-sm px-2 py-1 rounded hover:bg-white/5 flex items-center gap-1.5"
+          >
+            <ArrowLeft size={14} /> Close
+          </button>
+          <div className="text-sm font-semibold tracking-wide flex items-center gap-2">
+            <Box size={14} className="text-amber-500" />
+            CBCT Viewer
+          </div>
         </div>
-        <div className="text-[11px] text-gray-500">Cornerstone3D v4 · synchronized crosshairs</div>
+
+        {/* View-mode tabs — only MPR + 3D is wired today; the rest are
+            scaffolds for Phase 2/3 (reformatted pano, ceph, implant
+            planning, TMJ). Showing them now signals the roadmap and gives
+            us a place to drop functionality as it ships. */}
+        <div className="flex items-center gap-1 text-[11px]">
+          <ViewModeTab active label="MPR + 3D" />
+          <ViewModeTab label="Pano" tooltip="Reformatted panoramic — Phase 2" />
+          <ViewModeTab label="Cross-sections" tooltip="Arch-curve cross-sections — Phase 2" />
+          <ViewModeTab label="Ceph" tooltip="Cephalometric analysis — Phase 3" />
+          <ViewModeTab label="Implant" tooltip="Implant planning — Phase 3" />
+          <ViewModeTab label="TMJ" tooltip="TMJ bilateral — Phase 3" />
+        </div>
+
+        <div className="text-[11px] text-gray-500">Cornerstone3D v4</div>
       </div>
 
-      {/* 4-panel grid */}
-      <div className="flex-1 relative">
+      {/* Body: left toolbox | 4-panel grid | right info rail */}
+      <div className="flex-1 flex relative">
+        {/* LEFT — toolbox (vertical icon strip) */}
+        {stage === 'ready' && (
+          <div
+            className="flex flex-col items-center gap-1 py-2 px-1.5 border-r"
+            style={{ backgroundColor: PANEL_BG, borderColor: '#1d2128', width: 44 }}
+          >
+            <ToolButton  active={activeTool === 'crosshair'}     onClick={() => selectTool('crosshair')}     icon={CrosshairIcon} label="Crosshair (drag to re-slice)" />
+            <ToolButton  active={activeTool === 'length'}        onClick={() => selectTool('length')}        icon={Ruler}         label="Length — distance" />
+            <ToolButton  active={activeTool === 'angle'}         onClick={() => selectTool('angle')}         icon={Triangle}      label="Angle — 3-point" />
+            <ToolButton  active={activeTool === 'bidirectional'} onClick={() => selectTool('bidirectional')} icon={Plus}          label="Bidirectional — perpendicular max" />
+            <ToolButton  active={activeTool === 'probe'}         onClick={() => selectTool('probe')}         icon={Activity}      label="HU Probe — Hounsfield unit" />
+            <div className="h-px w-6 bg-gray-800 my-1" />
+            <ToolButton  active={activeTool === 'pan'}           onClick={() => selectTool('pan')}           icon={Move}          label="Pan" />
+            <ToolButton  active={activeTool === 'zoom'}          onClick={() => selectTool('zoom')}          icon={ZoomIn}        label="Zoom" />
+            <div className="h-px w-6 bg-gray-800 my-1" />
+            <ToolButton  active={false} onClick={handleResetViews}        icon={RotateCcw} label="Reset all views" />
+            <ToolButton  active={false} onClick={handleClearMeasurements} icon={Trash2}    label="Clear measurements" danger />
+          </div>
+        )}
+
+        {/* CENTER — 4-panel grid + loader overlay */}
+        <div className="flex-1 relative">
         {(stage !== 'ready') && (
           <div className="absolute inset-0 flex items-center justify-center z-30" style={{ backgroundColor: 'rgba(11,13,16,0.95)' }}>
             {stage === 'error' ? (
@@ -1099,39 +1145,14 @@ export default function CBCTViewerPage() {
           })}
         </div>
 
-        {/* Tool button (icon-only with tooltip) */}
-        {/* Defined inline below as a closure capture isn't needed */}
-        {/* Right rail — tools + presets */}
+        {/* Floating right rail — W/L presets + active tool hint */}
         {stage === 'ready' && (
           <div
-            className="absolute right-3 top-3 w-56 rounded-lg p-3 z-10 text-xs space-y-3"
+            className="absolute right-3 top-3 w-44 rounded-lg p-2.5 z-10 text-xs space-y-2"
             style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128' }}
           >
-            {/* Tools section */}
             <div>
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Tools</div>
-              <div className="grid grid-cols-4 gap-1">
-                <ToolButton  active={activeTool === 'crosshair'}     onClick={() => selectTool('crosshair')}     icon={CrosshairIcon} label="Crosshair" />
-                <ToolButton  active={activeTool === 'length'}        onClick={() => selectTool('length')}        icon={Ruler}         label="Length" />
-                <ToolButton  active={activeTool === 'angle'}         onClick={() => selectTool('angle')}         icon={Triangle}      label="Angle" />
-                <ToolButton  active={activeTool === 'bidirectional'} onClick={() => selectTool('bidirectional')} icon={Plus}          label="Bidirectional" />
-                <ToolButton  active={activeTool === 'probe'}         onClick={() => selectTool('probe')}         icon={Activity}      label="HU Probe" />
-                <ToolButton  active={activeTool === 'pan'}           onClick={() => selectTool('pan')}           icon={Move}          label="Pan" />
-                <ToolButton  active={activeTool === 'zoom'}          onClick={() => selectTool('zoom')}          icon={ZoomIn}        label="Zoom" />
-                <ToolButton  active={false}                          onClick={handleResetViews}                  icon={RotateCcw}     label="Reset views" />
-              </div>
-              <button
-                onClick={handleClearMeasurements}
-                className="mt-1.5 w-full text-[10px] py-1 rounded bg-gray-800 hover:bg-red-700 text-gray-300 hover:text-white flex items-center justify-center gap-1"
-                title="Clear all measurements"
-              >
-                <Trash2 size={10} /> Clear measurements
-              </button>
-            </div>
-
-            {/* W/L preset section */}
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">MPR Window</div>
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">MPR Window</div>
               <div className="grid grid-cols-2 gap-1">
                 {presetTable.map((p) => (
                   <button
@@ -1144,35 +1165,56 @@ export default function CBCTViewerPage() {
                 ))}
               </div>
             </div>
-
-            {/* Help */}
-            <p className="text-[10px] text-gray-500 leading-snug border-t border-gray-800 pt-2">
-              <span className="text-gray-300 font-semibold">Mouse:</span> left = active tool · right-drag = W/L · middle-drag = pan · wheel = slice.
-              <br />
-              <span className="text-gray-300 font-semibold">3D:</span> left-drag = rotate · wheel = zoom.
-            </p>
+            <div className="border-t border-gray-800 pt-1.5 text-[10px] text-gray-400 leading-snug">
+              <div className="font-semibold text-gray-300 mb-0.5">Active: {activeTool}</div>
+              right-drag = W/L · middle = pan · wheel = slice
+            </div>
           </div>
         )}
+        </div>
       </div>
     </div>
   );
 }
 
 /**
- * Compact icon button used in the right-rail toolbar. Highlights when
- * its tool is active so the user can see what mode they're in at a
- * glance.
+ * Top-bar tab for the view modes (MPR + 3D, Pano, Ceph, Implant, TMJ).
+ * Inactive tabs render as ghost buttons with a tooltip explaining what
+ * phase they belong to so the user can see the roadmap inline.
  */
-function ToolButton({ active, onClick, icon: Icon, label }) {
+function ViewModeTab({ active = false, label, tooltip }) {
+  return (
+    <button
+      title={tooltip || label}
+      disabled={!active}
+      className={`px-2.5 py-1 rounded text-[11px] tracking-wide transition-colors ${
+        active
+          ? 'bg-amber-600 text-white cursor-default'
+          : 'bg-transparent text-gray-500 hover:text-gray-300 cursor-help'
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * Compact icon button used in the left toolbox. Highlights when its
+ * tool is active. `danger=true` shifts the hover state to red for
+ * destructive actions (e.g. clear measurements).
+ */
+function ToolButton({ active, onClick, icon: Icon, label, danger = false }) {
   return (
     <button
       onClick={onClick}
       title={label}
       aria-label={label}
-      className={`flex items-center justify-center h-8 rounded transition-colors ${
+      className={`flex items-center justify-center w-8 h-8 rounded transition-colors ${
         active
           ? 'bg-amber-600 text-white'
-          : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+          : danger
+          ? 'bg-gray-800 hover:bg-red-700 text-gray-300 hover:text-white'
+          : 'bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white'
       }`}
     >
       <Icon size={14} />

@@ -8,6 +8,18 @@
     <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
     <title>aiHealth Imaging</title>
     <meta name="description" content="aiHealth Imaging — DICOM, CBCT, and intra-oral scan viewer." />
+
+    <!--
+      coi-serviceworker enables crossOriginIsolated (and therefore
+      SharedArrayBuffer) by injecting COOP/COEP/CORP response headers
+      via a service worker. Required by Cornerstone3D's streaming-image
+      volume loader for CBCT / CT volume rendering.
+
+      Belt + suspenders: vercel.json also sets the headers at the CDN
+      level. The SW guarantees they're applied even when the CDN cache
+      is stale or the browser doesn't honour `credentialless`.
+    -->
+    <script src="/coi-serviceworker.js"></script>
   </head>
   <body>
     <div id="root"></div>

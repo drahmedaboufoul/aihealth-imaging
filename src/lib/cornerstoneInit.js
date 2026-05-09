@@ -11,7 +11,27 @@
  */
 
 import { init as csInit, imageLoader, volumeLoader, Enums, RenderingEngine, getRenderingEngine, metaData, eventTarget, cache, utilities as csUtilities, setVolumesForViewports } from '@cornerstonejs/core';
-import { init as toolsInit, addTool, ToolGroupManager, WindowLevelTool, PanTool, ZoomTool, StackScrollTool, TrackballRotateTool, CrosshairsTool, Enums as toolsEnums, utilities as toolsUtilities, synchronizers as toolsSynchronizers, SynchronizerManager } from '@cornerstonejs/tools';
+import {
+  init as toolsInit,
+  addTool,
+  ToolGroupManager,
+  WindowLevelTool,
+  PanTool,
+  ZoomTool,
+  StackScrollTool,
+  TrackballRotateTool,
+  CrosshairsTool,
+  // Phase 1 measurement tools — Cornerstone3D ships these natively
+  LengthTool,
+  AngleTool,
+  BidirectionalTool,
+  ProbeTool,
+  Enums as toolsEnums,
+  utilities as toolsUtilities,
+  synchronizers as toolsSynchronizers,
+  SynchronizerManager,
+  annotation as toolsAnnotation,
+} from '@cornerstonejs/tools';
 import { init as dicomImageLoaderInit, wadouri, wadors } from '@cornerstonejs/dicom-image-loader';
 
 let initialized = false;
@@ -70,8 +90,14 @@ export const cornerstoneTools = {
   StackScrollTool,           // v4 rename: was StackScrollMouseWheelTool
   TrackballRotateTool,
   CrosshairsTool,             // v4 ships synchronized MPR crosshairs
+  // Phase 1 measurement tools
+  LengthTool,
+  AngleTool,
+  BidirectionalTool,
+  ProbeTool,
   Enums: toolsEnums,
   utilities: toolsUtilities,
   synchronizers: toolsSynchronizers,  // VOI / camera / image-slice sync
   SynchronizerManager,
+  annotation: toolsAnnotation,        // annotation manager (read/write/clear)
 };

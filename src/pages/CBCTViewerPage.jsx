@@ -23,9 +23,14 @@
  * user asked for.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useSearchParams, useNavigate, useLocation } from 'react-router-dom';
-import { Loader2, AlertCircle, ArrowLeft, Box } from 'lucide-react';
+import {
+  Loader2, AlertCircle, ArrowLeft, Box,
+  Move, ZoomIn, RotateCcw,
+  Ruler, Triangle, Crosshair as CrosshairIcon,
+  Activity, Trash2, Plus,
+} from 'lucide-react';
 import { resolveStudyDicomFiles, resolveStudyNiftiVolume } from '../lib/signedUrl';
 import { loadNiftiVolume } from '../lib/niftiLoader';
 import {
@@ -270,6 +275,23 @@ async function renderFromNifti({
 }
 
 /**
+ * Tools that take over the primary (left-click) action when the user
+ * activates them from the toolbar. These are mutually exclusive — only
+ * one of these may be bound to Primary at a time. Crosshair is the
+ * default; selecting another swaps it on Primary and parks crosshair on
+ * a side button (Aux, the middle-mouse).
+ */
+const PRIMARY_TOOLS = {
+  crosshair:    'CrosshairsTool',
+  length:       'Length',
+  angle:        'Angle',
+  bidirectional:'Bidirectional',
+  probe:        'Probe',
+  pan:          'Pan',
+  zoom:         'Zoom',
+};
+
+/**
  * Build the MPR + 3D tool groups + VOI synchronizer. Shared between the
  * NIfTI fast path and the DICOM streaming fallback so both render with
  * identical interaction.
@@ -286,10 +308,16 @@ function setupCbctToolGroups(engine) {
     cornerstoneTools.ZoomTool,
     cornerstoneTools.StackScrollTool,
     cornerstoneTools.CrosshairsTool,
+    cornerstoneTools.LengthTool,
+    cornerstoneTools.AngleTool,
+    cornerstoneTools.BidirectionalTool,
+    cornerstoneTools.ProbeTool,
   ];
   for (const T of mprTools) cornerstoneTools.addTool(T);
   try { cornerstoneTools.addTool(cornerstoneTools.TrackballRotateTool); } catch {}
 
+  // Register every tool in the group (passive by default; we set
+  // primary/secondary/wheel bindings below).
   mprGroup.addTool(cornerstoneTools.WindowLevelTool.toolName);
   mprGroup.addTool(cornerstoneTools.PanTool.toolName);
   mprGroup.addTool(cornerstoneTools.ZoomTool.toolName);
@@ -303,9 +331,16 @@ function setupCbctToolGroups(engine) {
     getReferenceLineDraggableRotatable: () => true,
     getReferenceLineSlabThicknessControlsOn: () => false,
   });
+  mprGroup.addTool(cornerstoneTools.LengthTool.toolName);
+  mprGroup.addTool(cornerstoneTools.AngleTool.toolName);
+  mprGroup.addTool(cornerstoneTools.BidirectionalTool.toolName);
+  mprGroup.addTool(cornerstoneTools.ProbeTool.toolName);
 
   for (const id of MPR_VIEWPORT_IDS) mprGroup.addViewport(id, RENDERING_ENGINE_ID);
 
+  // Default bindings — Crosshair on Primary, W/L on Secondary, Pan on
+  // middle, Wheel scrolls slices. setActivePrimaryTool() swaps Primary
+  // when the user picks a measurement tool from the toolbar.
   mprGroup.setToolActive(cornerstoneTools.CrosshairsTool.toolName, {
     bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
   });
@@ -345,6 +380,59 @@ function setupCbctToolGroups(engine) {
   }
 }
 
+/**
+ * Swap which tool is active on the Primary mouse button. Used by the
+ * toolbar to move between Crosshair / Length / Angle / etc. without
+ * disturbing the secondary / wheel bindings.
+ */
+function setActivePrimaryTool(toolName) {
+  const grp = cornerstoneTools.ToolGroupManager.getToolGroup(TOOL_GROUP_MPR_ID);
+  if (!grp) return;
+  const Primary = cornerstoneTools.Enums.MouseBindings.Primary;
+  // First, demote whichever tool currently owns Primary back to passive.
+  for (const t of Object.values(PRIMARY_TOOLS)) {
+    try { grp.setToolPassive(t); } catch {}
+  }
+  // Then activate the chosen tool on Primary.
+  try {
+    grp.setToolActive(toolName, { bindings: [{ mouseButton: Primary }] });
+  } catch (e) {
+    console.warn('[cbct] setActivePrimaryTool failed for', toolName, e?.message);
+  }
+}
+
+/**
+ * Reset all viewport cameras to their default (initial) position. Useful
+ * after the user has zoomed/panned around and wants to "go home".
+ */
+function resetAllViewports(engine) {
+  if (!engine) return;
+  for (const v of VIEWPORTS) {
+    try {
+      const vp = engine.getViewport(v.id);
+      vp?.resetCamera?.();
+      vp?.resetProperties?.();
+    } catch {}
+  }
+  engine.render();
+}
+
+/**
+ * Clear all measurement annotations across the MPR viewports. Doesn't
+ * touch the volume / camera — just wipes the lengths/angles/probes the
+ * user drew.
+ */
+function clearAllAnnotations() {
+  try {
+    cornerstoneTools.annotation?.state?.removeAllAnnotations?.();
+  } catch (e) {
+    console.warn('[cbct] clearAllAnnotations failed:', e?.message);
+  }
+  // Trigger a re-render so the cleared annotations actually disappear
+  const engine = cornerstone.getRenderingEngine(RENDERING_ENGINE_ID);
+  engine?.render();
+}
+
 export default function CBCTViewerPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -356,6 +444,15 @@ export default function CBCTViewerPage() {
   const [progress, setProgress] = useState(0);
   const [activePreset, setActivePreset] = useState('Bone');
   const [presetTable, setPresetTable] = useState(VOLUME_PRESETS_HU);
+
+  // Phase 1: active measurement / interaction tool. 'crosshair' is default.
+  const [activeTool, setActiveTool] = useState('crosshair');
+
+  // Per-panel slice HUD: { CBCT_AXIAL: { current, total }, ... }
+  const [sliceHud, setSliceHud] = useState({});
+
+  // HU readout from the Probe tool: { value, x, y, z } in patient mm + voxel value
+  const [probeReadout, setProbeReadout] = useState(null);
 
   const axialRef    = useRef(null);
   const coronalRef  = useRef(null);
@@ -822,6 +919,98 @@ export default function CBCTViewerPage() {
     setActivePreset(preset.name);
   };
 
+  // ── Slice HUD wiring ────────────────────────────────────────────────
+  // Listen for camera-modified events on each MPR viewport and update the
+  // current/total slice indicator. Cornerstone3D doesn't expose a
+  // first-class "current slice" API on volume orthographic viewports, so
+  // we derive it from the focal point projected onto the volume's slice
+  // axis.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    const engine = enginRef.current;
+    if (!engine) return;
+
+    const computeSlice = (vp) => {
+      try {
+        const camera = vp.getCamera();
+        const imageData = vp.getImageData?.();
+        if (!camera || !imageData) return null;
+        const { focalPoint, viewPlaneNormal } = camera;
+        const dimensions = imageData.dimensions || vp.getImageData()?.imageData?.getDimensions?.();
+        const spacing    = imageData.spacing    || vp.getImageData()?.imageData?.getSpacing?.();
+        const origin     = imageData.origin     || vp.getImageData()?.imageData?.getOrigin?.();
+        if (!dimensions || !spacing || !origin) return null;
+        // Project focal point onto the view plane normal (signed distance
+        // from volume origin), divide by spacing along that normal.
+        const dx = focalPoint[0] - origin[0];
+        const dy = focalPoint[1] - origin[1];
+        const dz = focalPoint[2] - origin[2];
+        const dist =
+          dx * viewPlaneNormal[0] +
+          dy * viewPlaneNormal[1] +
+          dz * viewPlaneNormal[2];
+        // Spacing along the view-plane normal (project unit normal onto
+        // each axis to find which voxel-spacing dominates).
+        const sliceSpacing =
+          Math.abs(viewPlaneNormal[0]) * spacing[0] +
+          Math.abs(viewPlaneNormal[1]) * spacing[1] +
+          Math.abs(viewPlaneNormal[2]) * spacing[2];
+        if (!sliceSpacing) return null;
+        const total =
+          Math.abs(viewPlaneNormal[0]) * dimensions[0] +
+          Math.abs(viewPlaneNormal[1]) * dimensions[1] +
+          Math.abs(viewPlaneNormal[2]) * dimensions[2];
+        const current = Math.max(1, Math.min(Math.round(total), Math.round(Math.abs(dist) / sliceSpacing) + 1));
+        return { current, total: Math.round(total) };
+      } catch {
+        return null;
+      }
+    };
+
+    const update = () => {
+      const next = {};
+      for (const id of MPR_VIEWPORT_IDS) {
+        const vp = engine.getViewport(id);
+        if (!vp) continue;
+        const s = computeSlice(vp);
+        if (s) next[id] = s;
+      }
+      setSliceHud(next);
+    };
+
+    // Initial update + listen for camera modifications
+    update();
+    const handler = (evt) => {
+      const vid = evt?.detail?.viewportId;
+      if (vid && MPR_VIEWPORT_IDS.includes(vid)) update();
+    };
+    cornerstone.eventTarget.addEventListener(
+      cornerstone.Enums.Events.CAMERA_MODIFIED, handler
+    );
+    return () => {
+      try {
+        cornerstone.eventTarget.removeEventListener(
+          cornerstone.Enums.Events.CAMERA_MODIFIED, handler
+        );
+      } catch {}
+    };
+  }, [stage]);
+
+  // ── Tool selection ─────────────────────────────────────────────────
+  const selectTool = useCallback((toolKey) => {
+    const toolName = PRIMARY_TOOLS[toolKey];
+    if (!toolName) return;
+    setActiveTool(toolKey);
+    setActivePrimaryTool(toolName);
+  }, []);
+
+  const handleResetViews = () => {
+    resetAllViewports(enginRef.current);
+  };
+  const handleClearMeasurements = () => {
+    clearAllAnnotations();
+  };
+
   return (
     <div className="h-screen w-screen flex flex-col" style={{ backgroundColor: SHELL_BG, color: '#cdd2d8' }}>
       {/* Header */}
@@ -874,6 +1063,7 @@ export default function CBCTViewerPage() {
         <div className="grid grid-cols-2 grid-rows-2 gap-px h-full" style={{ backgroundColor: '#1d2128' }}>
           {VIEWPORTS.map((v, idx) => {
             const ref = idx === 0 ? axialRef : idx === 1 ? coronalRef : idx === 2 ? sagittalRef : vrRef;
+            const hud = sliceHud[v.id];
             return (
               <div key={v.id} className="relative" style={{ backgroundColor: SHELL_BG }}>
                 <div
@@ -881,6 +1071,7 @@ export default function CBCTViewerPage() {
                   className="w-full h-full"
                   onContextMenu={(e) => e.preventDefault()}
                 />
+                {/* Plane label — top-left */}
                 <div
                   className="absolute top-2 left-2 text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded pointer-events-none"
                   style={{
@@ -891,32 +1082,72 @@ export default function CBCTViewerPage() {
                 >
                   {v.label}
                 </div>
+                {/* Slice number HUD — top-right (MPR only) */}
+                {hud && (
+                  <div
+                    className="absolute top-2 right-2 text-[10px] font-mono px-1.5 py-0.5 rounded pointer-events-none"
+                    style={{
+                      backgroundColor: 'rgba(11,13,16,0.7)',
+                      color: '#cdd2d8',
+                    }}
+                  >
+                    {hud.current} / {hud.total}
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
 
-        {/* Right rail with presets */}
+        {/* Tool button (icon-only with tooltip) */}
+        {/* Defined inline below as a closure capture isn't needed */}
+        {/* Right rail — tools + presets */}
         {stage === 'ready' && (
           <div
-            className="absolute right-3 top-3 w-52 rounded-lg p-3 z-10 text-xs"
+            className="absolute right-3 top-3 w-56 rounded-lg p-3 z-10 text-xs space-y-3"
             style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128' }}
           >
-            <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">MPR Window</div>
-            <div className="grid grid-cols-2 gap-1 mb-3">
-              {presetTable.map((p) => (
-                <button
-                  key={p.name}
-                  onClick={() => applyPreset(p)}
-                  className={`text-[11px] py-1.5 rounded ${activePreset === p.name ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700'}`}
-                >
-                  {p.name}
-                </button>
-              ))}
+            {/* Tools section */}
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Tools</div>
+              <div className="grid grid-cols-4 gap-1">
+                <ToolButton  active={activeTool === 'crosshair'}     onClick={() => selectTool('crosshair')}     icon={CrosshairIcon} label="Crosshair" />
+                <ToolButton  active={activeTool === 'length'}        onClick={() => selectTool('length')}        icon={Ruler}         label="Length" />
+                <ToolButton  active={activeTool === 'angle'}         onClick={() => selectTool('angle')}         icon={Triangle}      label="Angle" />
+                <ToolButton  active={activeTool === 'bidirectional'} onClick={() => selectTool('bidirectional')} icon={Plus}          label="Bidirectional" />
+                <ToolButton  active={activeTool === 'probe'}         onClick={() => selectTool('probe')}         icon={Activity}      label="HU Probe" />
+                <ToolButton  active={activeTool === 'pan'}           onClick={() => selectTool('pan')}           icon={Move}          label="Pan" />
+                <ToolButton  active={activeTool === 'zoom'}          onClick={() => selectTool('zoom')}          icon={ZoomIn}        label="Zoom" />
+                <ToolButton  active={false}                          onClick={handleResetViews}                  icon={RotateCcw}     label="Reset views" />
+              </div>
+              <button
+                onClick={handleClearMeasurements}
+                className="mt-1.5 w-full text-[10px] py-1 rounded bg-gray-800 hover:bg-red-700 text-gray-300 hover:text-white flex items-center justify-center gap-1"
+                title="Clear all measurements"
+              >
+                <Trash2 size={10} /> Clear measurements
+              </button>
             </div>
-            <p className="text-[10px] text-gray-500 leading-snug">
-              <span className="text-gray-300 font-semibold">MPR:</span> drag a crosshair to re-slice all three planes.
-              Right-drag = W/L · middle-drag = pan · wheel = scroll.
+
+            {/* W/L preset section */}
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">MPR Window</div>
+              <div className="grid grid-cols-2 gap-1">
+                {presetTable.map((p) => (
+                  <button
+                    key={p.name}
+                    onClick={() => applyPreset(p)}
+                    className={`text-[11px] py-1.5 rounded ${activePreset === p.name ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700'}`}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Help */}
+            <p className="text-[10px] text-gray-500 leading-snug border-t border-gray-800 pt-2">
+              <span className="text-gray-300 font-semibold">Mouse:</span> left = active tool · right-drag = W/L · middle-drag = pan · wheel = slice.
               <br />
               <span className="text-gray-300 font-semibold">3D:</span> left-drag = rotate · wheel = zoom.
             </p>
@@ -924,5 +1155,27 @@ export default function CBCTViewerPage() {
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Compact icon button used in the right-rail toolbar. Highlights when
+ * its tool is active so the user can see what mode they're in at a
+ * glance.
+ */
+function ToolButton({ active, onClick, icon: Icon, label }) {
+  return (
+    <button
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={`flex items-center justify-center h-8 rounded transition-colors ${
+        active
+          ? 'bg-amber-600 text-white'
+          : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+      }`}
+    >
+      <Icon size={14} />
+    </button>
   );
 }

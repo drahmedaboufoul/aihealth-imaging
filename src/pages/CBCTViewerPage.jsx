@@ -211,8 +211,11 @@ export default function CBCTViewerPage() {
         if (cancelled) return;
 
         // Sort by image position. Cornerstone's helper reads the now-cached
-        // metadata and returns the correct slice order + spacing.
+        // metadata and returns the correct slice order + Z spacing + origin.
         let sortedImageIds = imageIds;
+        let computedZSpacing = null;
+        let scanAxisNormal = null;
+        let computedOrigin = null;
         try {
           const result = cornerstone.utilities.sortImageIdsAndGetSpacing
             ? cornerstone.utilities.sortImageIdsAndGetSpacing(imageIds)
@@ -222,13 +225,68 @@ export default function CBCTViewerPage() {
           } else if (Array.isArray(result)) {
             sortedImageIds = result;
           }
+          if (typeof result?.zSpacing === 'number') computedZSpacing = result.zSpacing;
+          if (typeof result?.spacing === 'number') computedZSpacing = result.spacing;
+          if (Array.isArray(result?.scanAxisNormal)) scanAxisNormal = result.scanAxisNormal;
+          if (Array.isArray(result?.origin)) computedOrigin = result.origin;
         } catch (sortErr) {
           console.warn('[cbct] sortImageIdsAndGetSpacing failed:', sortErr?.message);
         }
 
+        // Diagnostic — dental CBCT often has metadata quirks, so log enough
+        // for us to debug from the user's console if MPR still misbehaves.
+        try {
+          const firstIpp = cornerstone.metaData.get('imagePlaneModule', sortedImageIds[0]);
+          const lastIpp  = cornerstone.metaData.get('imagePlaneModule', sortedImageIds[sortedImageIds.length - 1]);
+          console.log('[cbct] sort result', {
+            count: sortedImageIds.length,
+            computedZSpacing,
+            scanAxisNormal,
+            firstImagePosition: firstIpp?.imagePositionPatient,
+            firstPixelSpacing: firstIpp?.pixelSpacing,
+            firstSliceThickness: firstIpp?.sliceThickness,
+            firstRowCosines: firstIpp?.rowCosines,
+            firstColumnCosines: firstIpp?.columnCosines,
+            lastImagePosition: lastIpp?.imagePositionPatient,
+          });
+        } catch {}
+
         // Now build the volume from sorted IDs.
         const volume = await cornerstone.volumeLoader.createAndCacheVolume(volumeId, { imageIds: sortedImageIds });
         if (cancelled) return;
+
+        // Sanity-check + override the volume's Z spacing if cornerstone's
+        // auto-detection disagrees with our explicit computation. Dental
+        // CBCT sometimes ships with mis-stamped SliceThickness or partial
+        // ImagePositionPatient values, which makes the volume's Z dimension
+        // too tall (causing cross-axis MPR to sample empty voxels = stripes,
+        // and the 3D render to show a stretched "stem" below the head).
+        try {
+          const cur = Array.isArray(volume.spacing) ? [...volume.spacing] : null;
+          console.log('[cbct] volume geometry', {
+            dimensions: volume.dimensions,
+            spacing: cur,
+            origin: volume.origin,
+            direction: volume.direction,
+          });
+          if (cur && computedZSpacing && Math.abs(cur[2] - computedZSpacing) > 0.01) {
+            console.warn(
+              '[cbct] overriding Z spacing', cur[2], '→', computedZSpacing,
+              '(volume auto-detect disagreed with sortImageIdsAndGetSpacing)'
+            );
+            volume.spacing = [cur[0], cur[1], computedZSpacing];
+            // Push the change into the underlying vtkImageData so renders
+            // pick it up. v4's volume keeps a vtkImageData mirror of these.
+            try {
+              if (volume.imageData?.setSpacing) {
+                volume.imageData.setSpacing(cur[0], cur[1], computedZSpacing);
+                volume.imageData.modified?.();
+              }
+            } catch {}
+          }
+        } catch (geomErr) {
+          console.warn('[cbct] geometry sanity check failed:', geomErr?.message);
+        }
 
         // Build rendering engine + viewports
         let engine = cornerstone.getRenderingEngine(RENDERING_ENGINE_ID);

@@ -65,6 +65,10 @@ export default function IOSViewerPage() {
   const queryName = searchParams.get('name');
   const fileType = searchParams.get('type') || 'stl';
   const studyId = searchParams.get('study');
+  // Read-only mode for patient portal embeds: hides clinical tools
+  // (measurement, occlusal contact, analysis, mouse settings) while
+  // keeping orbit, zoom, pan, layer toggles, and view presets.
+  const readOnly = searchParams.get('readonly') === '1' || searchParams.get('mode') === 'patient';
 
   // Memoize patient + scan so their object references stay stable across
   // renders. Without this, ModelViewer's `useEffect(..., [scan])` re-runs
@@ -214,6 +218,7 @@ export default function IOSViewerPage() {
         fileUrl={fileUrl}
         fileType={fileType}
         files={files}
+        readOnly={readOnly}
         onMeshesReady={(layers) =>
           setViewerSettings((s) => ({ ...s, meshLayers: layers }))
         }

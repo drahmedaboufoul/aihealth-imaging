@@ -40,6 +40,10 @@ interface ModelViewerProps {
   files?: MeshFile[] | null;
   /** Receives per-mesh layer descriptors after MultiMeshModel finishes loading. */
   onMeshesReady?: (layers: ViewerSettings['meshLayers']) => void;
+  /** Patient-portal embed mode. Hides clinical tools (measurement,
+   *  occlusal contact, analysis, mouse settings) but keeps orbit/zoom/
+   *  pan/layer toggles/view presets. */
+  readOnly?: boolean;
 }
 
 // File-based 3D Model Component
@@ -535,6 +539,7 @@ export function ModelViewer({
   fileType,
   files,
   onMeshesReady,
+  readOnly = false,
 }: ModelViewerProps) {
   const isMultiFile = !!(files && files.length > 0);
   const [isLoading, setIsLoading] = useState(true);
@@ -604,23 +609,27 @@ export function ModelViewer({
         {/* Loading Screen */}
         {isLoading && <LoadingScreen progress={Math.min(Math.round(loadingProgress), 100)} />}
 
-        {/* Left Toolbar */}
-        <div className="absolute left-4 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-2">
-          {tools.map((tool) => (
-            <button
-              key={tool.id}
-              onClick={() => onSetTool(activeTool === tool.id ? 'none' : tool.id)}
-              className={`w-10 h-10 rounded-lg flex items-center justify-center transition-all ${
-                activeTool === tool.id
-                  ? 'bg-blue-600 text-white shadow-lg'
-                  : 'bg-white text-gray-600 hover:bg-gray-50 shadow-md'
-              }`}
-              title={tool.label}
-            >
-              <tool.icon className="w-5 h-5" />
-            </button>
-          ))}
-        </div>
+        {/* Left Toolbar — clinical tools (measurement / occlusal / analysis).
+             Hidden in read-only patient-portal embed: patients orbit / zoom
+             / fade layers, but don't measure or annotate. */}
+        {!readOnly && (
+          <div className="absolute left-4 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-2">
+            {tools.map((tool) => (
+              <button
+                key={tool.id}
+                onClick={() => onSetTool(activeTool === tool.id ? 'none' : tool.id)}
+                className={`w-10 h-10 rounded-lg flex items-center justify-center transition-all ${
+                  activeTool === tool.id
+                    ? 'bg-blue-600 text-white shadow-lg'
+                    : 'bg-white text-gray-600 hover:bg-gray-50 shadow-md'
+                }`}
+                title={tool.label}
+              >
+                <tool.icon className="w-5 h-5" />
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* 3D Canvas */}
         <div className="flex-1 relative">
@@ -738,13 +747,15 @@ export function ModelViewer({
             >
               <RotateCcw className="w-5 h-5" />
             </button>
-            <button
-              onClick={() => setShowMouseSettings(true)}
-              className="w-10 h-10 rounded-lg bg-white text-gray-600 hover:bg-gray-50 shadow-md flex items-center justify-center"
-              title="Mouse Settings"
-            >
-              <MousePointer2 className="w-5 h-5" />
-            </button>
+            {!readOnly && (
+              <button
+                onClick={() => setShowMouseSettings(true)}
+                className="w-10 h-10 rounded-lg bg-white text-gray-600 hover:bg-gray-50 shadow-md flex items-center justify-center"
+                title="Mouse Settings"
+              >
+                <MousePointer2 className="w-5 h-5" />
+              </button>
+            )}
             <button
               onClick={() => onUpdateSettings({ showGrid: !viewerSettings.showGrid })}
               className={`w-10 h-10 rounded-lg shadow-md flex items-center justify-center transition-colors ${

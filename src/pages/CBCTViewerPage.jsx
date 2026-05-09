@@ -253,42 +253,99 @@ export default function CBCTViewerPage() {
           }
         }
 
-        // Sort the chosen group by image position.
-        let sortedImageIds = groupedImageIds;
-        let scanAxisNormal = null;
-        try {
-          const result = cornerstone.utilities.sortImageIdsAndGetSpacing
-            ? cornerstone.utilities.sortImageIdsAndGetSpacing(groupedImageIds)
-            : { sortedImageIds: groupedImageIds };
-          if (Array.isArray(result?.sortedImageIds) && result.sortedImageIds.length > 0) {
-            sortedImageIds = result.sortedImageIds;
-          } else if (Array.isArray(result)) {
-            sortedImageIds = result;
-          }
-          if (Array.isArray(result?.scanAxisNormal)) scanAxisNormal = result.scanAxisNormal;
-          console.log('[cbct] sort result', {
-            count: sortedImageIds.length,
-            zSpacing: result?.zSpacing ?? result?.spacing,
-            scanAxisNormal,
-          });
-        } catch (sortErr) {
-          console.warn('[cbct] sortImageIdsAndGetSpacing failed:', sortErr?.message);
+        // Manual sort by ImagePositionPatient projected onto the
+        // orientation-derived scan axis. We don't rely on cornerstone's
+        // sortImageIdsAndGetSpacing here because it returns scanAxisNormal:
+        // null on this CBCT, which means it can't determine slice direction
+        // from the metadata — and downstream volume geometry is then wrong.
+        //
+        // Instead we compute the scan-axis normal from row × column cosines
+        // (always works for a coherent series) and project each slice's IPP
+        // onto it to get an unambiguous Z position.
+        const refPlane = cornerstone.metaData.get('imagePlaneModule', groupedImageIds[0]);
+        const rowCos = refPlane?.rowCosines || [1, 0, 0];
+        const colCos = refPlane?.columnCosines || [0, 1, 0];
+        // Normal = row × col
+        const normal = [
+          rowCos[1] * colCos[2] - rowCos[2] * colCos[1],
+          rowCos[2] * colCos[0] - rowCos[0] * colCos[2],
+          rowCos[0] * colCos[1] - rowCos[1] * colCos[0],
+        ];
+        const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+        const slicesWithPos = groupedImageIds
+          .map((id) => {
+            const p = cornerstone.metaData.get('imagePlaneModule', id);
+            const ipp = p?.imagePositionPatient;
+            if (!Array.isArray(ipp) || ipp.length !== 3) return null;
+            return { id, ipp, axisProj: dot(ipp, normal) };
+          })
+          .filter(Boolean)
+          .sort((a, b) => a.axisProj - b.axisProj);
+
+        const sortedImageIds = slicesWithPos.map((s) => s.id);
+
+        // Compute true Z spacing from consecutive IPP projections. This is
+        // the actual physical distance between adjacent slices.
+        const zDeltas = [];
+        for (let i = 1; i < slicesWithPos.length; i++) {
+          zDeltas.push(slicesWithPos[i].axisProj - slicesWithPos[i - 1].axisProj);
         }
+        zDeltas.sort((a, b) => a - b);
+        const medianZSpacing = zDeltas.length
+          ? zDeltas[Math.floor(zDeltas.length / 2)]
+          : 1.0;
+
+        const minDelta = zDeltas[0];
+        const maxDelta = zDeltas[zDeltas.length - 1];
+        const meanDelta = zDeltas.reduce((s, x) => s + x, 0) / Math.max(1, zDeltas.length);
+
+        console.log('[cbct] manual sort + spacing', {
+          slicesWithIpp: slicesWithPos.length,
+          totalSlices: groupedImageIds.length,
+          rowCosines: rowCos,
+          columnCosines: colCos,
+          computedNormal: normal,
+          medianZSpacing,
+          meanZDelta: meanDelta,
+          minZDelta: minDelta,
+          maxZDelta: maxDelta,
+          first5IppZ: slicesWithPos.slice(0, 5).map((s) => s.axisProj),
+          last5IppZ: slicesWithPos.slice(-5).map((s) => s.axisProj),
+          // First 5 raw IPPs to sanity check
+          first5Ipp: slicesWithPos.slice(0, 5).map((s) => s.ipp),
+        });
 
         // Now build the volume from sorted IDs of a single coherent series.
         const volume = await cornerstone.volumeLoader.createAndCacheVolume(volumeId, { imageIds: sortedImageIds });
         if (cancelled) return;
 
-        // Diagnostic geometry log (no override this time — within a single
-        // coherent series cornerstone's auto-detect should be correct).
+        // Aggressively override the volume's geometry if we computed a
+        // sensible Z spacing. This is the line where browser-side metadata
+        // detection has been failing — we trust our manual computation.
         try {
-          console.log('[cbct] volume geometry', {
-            dimensions: volume.dimensions,
-            spacing: Array.isArray(volume.spacing) ? [...volume.spacing] : volume.spacing,
-            origin: volume.origin,
-            direction: volume.direction,
+          const cur = Array.isArray(volume.spacing) ? [...volume.spacing] : null;
+          console.log('[cbct] volume geometry (pre-override)', {
+            dimensions: Array.isArray(volume.dimensions) ? [...volume.dimensions] : volume.dimensions,
+            spacing: cur,
+            origin: Array.isArray(volume.origin) ? [...volume.origin] : volume.origin,
           });
-        } catch {}
+          if (cur && Number.isFinite(medianZSpacing) && medianZSpacing > 0.01 && medianZSpacing < 5) {
+            const newSpacing = [cur[0], cur[1], Math.abs(medianZSpacing)];
+            if (Math.abs(cur[2] - newSpacing[2]) > 0.005) {
+              console.warn('[cbct] forcing Z spacing', cur[2], '→', newSpacing[2], '(from median IPP delta)');
+              volume.spacing = newSpacing;
+              try {
+                if (volume.imageData?.setSpacing) {
+                  volume.imageData.setSpacing(newSpacing[0], newSpacing[1], newSpacing[2]);
+                  volume.imageData.modified?.();
+                }
+              } catch {}
+            }
+          }
+        } catch (geomErr) {
+          console.warn('[cbct] geometry override failed:', geomErr?.message);
+        }
 
         // Build rendering engine + viewports
         let engine = cornerstone.getRenderingEngine(RENDERING_ENGINE_ID);

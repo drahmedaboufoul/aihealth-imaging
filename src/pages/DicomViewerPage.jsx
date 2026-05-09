@@ -1,10 +1,11 @@
 /*
  * DicomViewerPage — 2D DICOM viewer for X-rays, panoramic, periapical,
- * mammography, US single-frame.
+ * mammography, US, and CBCT series stack-scrolling.
  *
  * URL contract:
  *   /viewer/dicom?id=<patient_files.id>     single DICOM file by id
  *   /viewer/dicom?path=<bucket/key>         direct path
+ *   /viewer/dicom?study=<imaging_studies.id> CBCT / multi-instance series
  *   /viewer/dicom?demo=1                    demo (deferred — needs sample)
  *
  * Stage B.3 V1 — uncompressed transfer syntaxes only. Compressed support
@@ -21,7 +22,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useSearchParams, Link, useNavigate, useLocation } from 'react-router-dom';
 import { Loader2, AlertCircle, ArrowLeft, ExternalLink, Sun, RotateCcw, Camera } from 'lucide-react';
-import { resolveSignedUrl } from '../lib/signedUrl';
+import { resolveSignedUrl, resolveStudyDicomFiles } from '../lib/signedUrl';
 import { loadDicom, WL_PRESETS } from '../lib/dicomLoader';
 import { supabase } from '../lib/supabase';
 
@@ -48,11 +49,20 @@ export default function DicomViewerPage() {
   const location = useLocation();
   const fileId   = searchParams.get('id');
   const filePath = searchParams.get('path');
+  const studyId  = searchParams.get('study');
   const isDemo   = searchParams.get('demo') === '1';
 
   const [loadStage, setLoadStage] = useState('init'); // init | fetching | parsing | ready | error
   const [error, setError] = useState(null);
-  const [dicom, setDicom] = useState(null);    // result of loadDicom
+  const [dicom, setDicom] = useState(null);    // result of loadDicom (current instance)
+
+  // Multi-instance state — set when study= mode resolves a series.
+  const [instances, setInstances] = useState(null); // null = single-file mode
+  const [instanceIdx, setInstanceIdx] = useState(0);
+  const [instanceLoading, setInstanceLoading] = useState(false);
+  // Tiny in-memory cache so back-and-forth scrolling doesn't re-fetch.
+  // 30 frames * ~500KB each = ~15MB ceiling.
+  const dicomCacheRef = useRef(new Map());
 
   // Display state
   const [windowCenter, setWindowCenter] = useState(40);
@@ -62,6 +72,7 @@ export default function DicomViewerPage() {
   const [panX,    setPanX]    = useState(0);
   const [panY,    setPanY]    = useState(0);
   const [invert,  setInvert]  = useState(false);
+  const wlInitialized = useRef(false); // remember user's WL across stack scroll
 
   // Refs for canvas + offscreen pixel buffer
   const canvasRef       = useRef(null);
@@ -91,13 +102,31 @@ export default function DicomViewerPage() {
         if (isDemo) {
           throw new Error('Demo mode for DICOM not wired yet — drop a sample DICOM in test-fixtures/ first.');
         }
-        if (!fileId && !filePath) {
-          throw new Error('No DICOM source specified. URL must include ?id=<file_id> or ?path=<bucket/key>.');
+        if (!fileId && !filePath && !studyId) {
+          throw new Error('No DICOM source specified. URL must include ?id=<file_id>, ?path=<bucket/key>, or ?study=<study_id>.');
         }
+
+        // Multi-instance series mode — resolve the list, then load
+        // instance 0. Subsequent instances are loaded lazily by the
+        // instanceIdx effect below when the user scrolls the slider.
+        if (studyId) {
+          const list = await resolveStudyDicomFiles(studyId);
+          if (cancelled) return;
+          // Reset the cache for a fresh study load
+          dicomCacheRef.current = new Map();
+          wlInitialized.current = false;
+          setInstances(list);
+          setInstanceIdx(0);
+          // The instanceIdx effect will handle the actual fetch + parse.
+          // We mark loadStage 'ready' here and let the per-instance loader
+          // flip the canvas + dicom state once the first frame is in.
+          // Nothing else to do in this effect — early return.
+          return;
+        }
+
+        // Single-file mode (legacy)
         const { url } = await resolveSignedUrl({ id: fileId, path: filePath });
         if (cancelled) return;
-
-        // Stream the file
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Fetch failed: HTTP ${res.status}`);
         const buf = await res.arrayBuffer();
@@ -107,24 +136,7 @@ export default function DicomViewerPage() {
         const parsed = await loadDicom(buf);
         if (cancelled) return;
 
-        // Apply file's default W/L
-        setWindowCenter(parsed.defaultWindowCenter);
-        setWindowWidth(parsed.defaultWindowWidth);
-        setFrameIndex(0);
-        setZoom(1);
-        setPanX(0);
-        setPanY(0);
-        setInvert(false);
-
-        // Set up offscreen canvas at native resolution
-        const ocan = document.createElement('canvas');
-        ocan.width  = parsed.meta.columns;
-        ocan.height = parsed.meta.rows;
-        offscreenCanvas.current = ocan;
-        const octx = ocan.getContext('2d');
-        imageDataRef.current = octx.createImageData(parsed.meta.columns, parsed.meta.rows);
-
-        setDicom(parsed);
+        applyParsedDicom(parsed, /* isFirstOfSeries */ true);
         setLoadStage('ready');
       } catch (err) {
         if (cancelled) return;
@@ -133,7 +145,73 @@ export default function DicomViewerPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [fileId, filePath, isDemo, navigate, location.pathname, location.search]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileId, filePath, studyId, isDemo, navigate]);
+
+  // Apply a parsed DICOM as the current displayed image. Sets up the
+  // offscreen canvas at native resolution + initializes W/L on the first
+  // frame of a series only (so user-tweaked W/L persists across scroll).
+  function applyParsedDicom(parsed, isFirstOfSeries) {
+    if (isFirstOfSeries && !wlInitialized.current) {
+      setWindowCenter(parsed.defaultWindowCenter);
+      setWindowWidth(parsed.defaultWindowWidth);
+      setFrameIndex(0);
+      setZoom(1);
+      setPanX(0);
+      setPanY(0);
+      setInvert(false);
+      wlInitialized.current = true;
+    }
+    const ocan = document.createElement('canvas');
+    ocan.width  = parsed.meta.columns;
+    ocan.height = parsed.meta.rows;
+    offscreenCanvas.current = ocan;
+    const octx = ocan.getContext('2d');
+    imageDataRef.current = octx.createImageData(parsed.meta.columns, parsed.meta.rows);
+    setDicom(parsed);
+  }
+
+  // Lazy per-instance loader for multi-instance series mode. Caches up to
+  // 30 parsed instances; on cache miss, fetches + parses just that one.
+  useEffect(() => {
+    if (!instances || instances.length === 0) return;
+    const idx = Math.max(0, Math.min(instanceIdx, instances.length - 1));
+    let cancelled = false;
+    const cached = dicomCacheRef.current.get(idx);
+    if (cached) {
+      applyParsedDicom(cached, idx === 0);
+      setLoadStage('ready');
+      return;
+    }
+    (async () => {
+      setInstanceLoading(true);
+      try {
+        const url = instances[idx].url;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Fetch failed for instance ${idx}: HTTP ${res.status}`);
+        const buf = await res.arrayBuffer();
+        if (cancelled) return;
+        const parsed = await loadDicom(buf);
+        if (cancelled) return;
+        // LRU-ish trim: 30 frames = ~15MB at typical CBCT slice size
+        dicomCacheRef.current.set(idx, parsed);
+        if (dicomCacheRef.current.size > 30) {
+          const firstKey = dicomCacheRef.current.keys().next().value;
+          if (firstKey !== idx) dicomCacheRef.current.delete(firstKey);
+        }
+        applyParsedDicom(parsed, idx === 0);
+        setLoadStage('ready');
+      } catch (err) {
+        if (cancelled) return;
+        setError(err?.message || String(err));
+        setLoadStage('error');
+      } finally {
+        if (!cancelled) setInstanceLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instances, instanceIdx]);
 
   // Render the current frame to canvas whenever W/L, frame, or zoom changes
   useEffect(() => {
@@ -191,6 +269,30 @@ export default function DicomViewerPage() {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+
+  // Keyboard scrolling for the instance stack — Up/Down arrows move one
+  // slice at a time; PageUp/PageDown move 10 at a time. Standard radiology
+  // workstation interaction.
+  useEffect(() => {
+    if (!instances || instances.length <= 1) return;
+    const onKey = (e) => {
+      // Don't interfere with typing in inputs.
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const N = instances.length;
+      let next = instanceIdx;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') next = Math.min(N - 1, instanceIdx + 1);
+      else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') next = Math.max(0, instanceIdx - 1);
+      else if (e.key === 'PageDown') next = Math.min(N - 1, instanceIdx + 10);
+      else if (e.key === 'PageUp') next = Math.max(0, instanceIdx - 10);
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = N - 1;
+      else return;
+      e.preventDefault();
+      setInstanceIdx(next);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [instances, instanceIdx]);
 
   // Mouse handlers — left-drag pan, right-drag W/L, wheel zoom
   const onCanvasMouseDown = useCallback((e) => {
@@ -394,7 +496,7 @@ export default function DicomViewerPage() {
           />
         </div>
 
-        {/* Frame slider for multi-frame */}
+        {/* Frame slider for multi-frame inside ONE DICOM file */}
         {totalFrames > 1 && (
           <div className="mb-3">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400 mb-1">
@@ -410,6 +512,31 @@ export default function DicomViewerPage() {
               onChange={(e) => setFrameIndex(Number(e.target.value))}
               className="w-full"
             />
+          </div>
+        )}
+
+        {/* Instance slider for multi-instance series (CBCT, CT volume) */}
+        {instances && instances.length > 1 && (
+          <div className="mb-3">
+            <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400 mb-1">
+              <span>Slice</span>
+              <span className="tabular-nums text-gray-300">
+                {instanceIdx + 1} / {instances.length}
+                {instanceLoading && <span className="ml-1 text-amber-500">(loading…)</span>}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={instances.length - 1}
+              step={1}
+              value={instanceIdx}
+              onChange={(e) => setInstanceIdx(Number(e.target.value))}
+              className="w-full"
+            />
+            <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+              Drag the slider or press ↑/↓ to scroll the stack. Up to 30 frames cached.
+            </p>
           </div>
         )}
 

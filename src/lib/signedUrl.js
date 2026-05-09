@@ -5,6 +5,7 @@
  *   ?id=<patient_files.id>     (preferred — looks up file_path + bucket)
  *   ?path=<bucket/key>         (fallback — direct path)
  *   ?study=<imaging_studies.id> (multi-file — load all 3D scans for the study)
+ *   resolveStudyDicomFiles      (multi-instance — DICOM stack for a study)
  */
 
 import { supabase } from './supabase';
@@ -91,5 +92,58 @@ export async function resolveStudyFiles(studyId) {
 
   const ok = signed.filter(Boolean);
   if (ok.length === 0) throw new Error(`Could not sign any files for study ${studyId}`);
+  return ok;
+}
+
+/**
+ * Resolve every DICOM instance belonging to an imaging_studies row into
+ * signed URLs, ordered by SOP Instance UID (which mirrors slice order for
+ * a CT/CBCT series in most modern scanners). Used by
+ * /viewer/dicom?study=<id> to render a stack-scrollable series.
+ *
+ * Returns the same shape as resolveStudyFiles plus the original_filename
+ * which the viewer uses to label slices on the slider hover.
+ *
+ * For very large series (CBCT can be 200-500 instances) the URL signing
+ * itself stays cheap (a single batched SQL query + parallel sign calls)
+ * — the viewer is responsible for fetching pixel data lazily per frame.
+ */
+export async function resolveStudyDicomFiles(studyId) {
+  if (!studyId) throw new Error('studyId is required');
+
+  const { data: rows, error } = await supabase
+    .from('imaging_files')
+    .select('id, storage_path, original_filename, sop_instance_uid, file_size')
+    .eq('study_id', studyId)
+    .eq('file_kind', 'dicom')
+    .order('sop_instance_uid', { ascending: true, nullsFirst: false });
+
+  if (error) throw new Error(`imaging_files lookup failed: ${error.message}`);
+  if (!rows || rows.length === 0) {
+    throw new Error(`No DICOM files found for study ${studyId}`);
+  }
+
+  // Sign in parallel. CBCT series of 400 instances signs in ~1-2s thanks to
+  // Promise.all + Supabase's batched API.
+  const signed = await Promise.all(rows.map(async (row) => {
+    const { data, error: sErr } = await supabase
+      .storage
+      .from(IMAGING_BUCKET)
+      .createSignedUrl(row.storage_path, 60 * 60);
+    if (sErr) {
+      console.warn(`[resolveStudyDicomFiles] sign failed for ${row.storage_path}: ${sErr.message}`);
+      return null;
+    }
+    return {
+      url: data.signedUrl,
+      fileName: row.original_filename || row.storage_path.split('/').pop(),
+      sopInstanceUid: row.sop_instance_uid,
+      fileId: row.id,
+      fileSize: row.file_size,
+    };
+  }));
+
+  const ok = signed.filter(Boolean);
+  if (ok.length === 0) throw new Error(`Could not sign any DICOM files for study ${studyId}`);
   return ok;
 }

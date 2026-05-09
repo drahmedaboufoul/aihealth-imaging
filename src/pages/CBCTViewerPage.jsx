@@ -190,10 +190,10 @@ export default function CBCTViewerPage() {
         // Pre-load every instance so the metadata providers are populated
         // BEFORE we ask the volume loader to sort by ImagePositionPatient.
         // Without this, the streaming volume loader creates a volume with
-        // slices in arbitrary order — axial looks fine (just shows one
-        // slice) but coronal + sagittal sample across mis-ordered Z and
-        // produce diagonal-stripe garbage. Pre-loading takes ~10-30s for
-        // a 400-slice CBCT but is mandatory for correct MPR geometry.
+        // slices in arbitrary order. Pre-loading takes ~10-30s for a
+        // 400-slice CBCT but is mandatory for correct MPR geometry AND
+        // for the series-grouping pass below (we need orientation +
+        // SeriesInstanceUID populated for every image).
         let loaded = 0;
         await Promise.all(imageIds.map(async (id) => {
           try {
@@ -210,83 +210,85 @@ export default function CBCTViewerPage() {
         }));
         if (cancelled) return;
 
-        // Sort by image position. Cornerstone's helper reads the now-cached
-        // metadata and returns the correct slice order + Z spacing + origin.
-        let sortedImageIds = imageIds;
-        let computedZSpacing = null;
+        // CBCT uploads almost always contain MORE than one DICOM series:
+        // the primary axial reconstruction PLUS scout images, secondary
+        // thin recons, MIP volumes, etc. If we feed all of them into one
+        // volume the slices end up at conflicting Z positions, the spacing
+        // auto-detect picks an average that fits NEITHER series, and
+        // cross-axis MPR alternates between series → striped garbage.
+        //
+        // Fix: group imageIds by (SeriesInstanceUID, orientation), pick
+        // the largest coherent group, and build the volume from only that.
+        const orientKey = (cosines) =>
+          Array.isArray(cosines) ? cosines.map((x) => x.toFixed(3)).join(',') : 'na';
+        const groups = new Map();
+        for (const id of imageIds) {
+          const series = cornerstone.metaData.get('generalSeriesModule', id);
+          const plane  = cornerstone.metaData.get('imagePlaneModule', id);
+          const seriesUID = series?.seriesInstanceUID || 'unknown';
+          const orient = `${orientKey(plane?.rowCosines)}|${orientKey(plane?.columnCosines)}`;
+          const key = `${seriesUID}::${orient}`;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(id);
+        }
+
+        // Pick the largest group. Tie-break: prefer the one with valid
+        // ImageOrientationPatient (filters out scouts which sometimes
+        // ship with no cosines).
+        const groupSummary = Array.from(groups.entries())
+          .map(([key, ids]) => ({ key, count: ids.length, hasOrient: !key.endsWith('::na|na') }))
+          .sort((a, b) => (b.count - a.count) || (Number(b.hasOrient) - Number(a.hasOrient)));
+        console.log('[cbct] series groups', groupSummary);
+
+        let groupedImageIds = imageIds;
+        if (groupSummary.length > 0) {
+          const winner = groupSummary[0];
+          groupedImageIds = groups.get(winner.key);
+          console.log('[cbct] picked series group', winner.key, '→', winner.count, 'of', imageIds.length, 'slices');
+          if (groupedImageIds.length < 3) {
+            // Safety: if grouping produced too small a result, fall back
+            // to the whole set so the user at least sees something.
+            console.warn('[cbct] best group too small, falling back to all images');
+            groupedImageIds = imageIds;
+          }
+        }
+
+        // Sort the chosen group by image position.
+        let sortedImageIds = groupedImageIds;
         let scanAxisNormal = null;
-        let computedOrigin = null;
         try {
           const result = cornerstone.utilities.sortImageIdsAndGetSpacing
-            ? cornerstone.utilities.sortImageIdsAndGetSpacing(imageIds)
-            : { sortedImageIds: imageIds };
+            ? cornerstone.utilities.sortImageIdsAndGetSpacing(groupedImageIds)
+            : { sortedImageIds: groupedImageIds };
           if (Array.isArray(result?.sortedImageIds) && result.sortedImageIds.length > 0) {
             sortedImageIds = result.sortedImageIds;
           } else if (Array.isArray(result)) {
             sortedImageIds = result;
           }
-          if (typeof result?.zSpacing === 'number') computedZSpacing = result.zSpacing;
-          if (typeof result?.spacing === 'number') computedZSpacing = result.spacing;
           if (Array.isArray(result?.scanAxisNormal)) scanAxisNormal = result.scanAxisNormal;
-          if (Array.isArray(result?.origin)) computedOrigin = result.origin;
+          console.log('[cbct] sort result', {
+            count: sortedImageIds.length,
+            zSpacing: result?.zSpacing ?? result?.spacing,
+            scanAxisNormal,
+          });
         } catch (sortErr) {
           console.warn('[cbct] sortImageIdsAndGetSpacing failed:', sortErr?.message);
         }
 
-        // Diagnostic — dental CBCT often has metadata quirks, so log enough
-        // for us to debug from the user's console if MPR still misbehaves.
-        try {
-          const firstIpp = cornerstone.metaData.get('imagePlaneModule', sortedImageIds[0]);
-          const lastIpp  = cornerstone.metaData.get('imagePlaneModule', sortedImageIds[sortedImageIds.length - 1]);
-          console.log('[cbct] sort result', {
-            count: sortedImageIds.length,
-            computedZSpacing,
-            scanAxisNormal,
-            firstImagePosition: firstIpp?.imagePositionPatient,
-            firstPixelSpacing: firstIpp?.pixelSpacing,
-            firstSliceThickness: firstIpp?.sliceThickness,
-            firstRowCosines: firstIpp?.rowCosines,
-            firstColumnCosines: firstIpp?.columnCosines,
-            lastImagePosition: lastIpp?.imagePositionPatient,
-          });
-        } catch {}
-
-        // Now build the volume from sorted IDs.
+        // Now build the volume from sorted IDs of a single coherent series.
         const volume = await cornerstone.volumeLoader.createAndCacheVolume(volumeId, { imageIds: sortedImageIds });
         if (cancelled) return;
 
-        // Sanity-check + override the volume's Z spacing if cornerstone's
-        // auto-detection disagrees with our explicit computation. Dental
-        // CBCT sometimes ships with mis-stamped SliceThickness or partial
-        // ImagePositionPatient values, which makes the volume's Z dimension
-        // too tall (causing cross-axis MPR to sample empty voxels = stripes,
-        // and the 3D render to show a stretched "stem" below the head).
+        // Diagnostic geometry log (no override this time — within a single
+        // coherent series cornerstone's auto-detect should be correct).
         try {
-          const cur = Array.isArray(volume.spacing) ? [...volume.spacing] : null;
           console.log('[cbct] volume geometry', {
             dimensions: volume.dimensions,
-            spacing: cur,
+            spacing: Array.isArray(volume.spacing) ? [...volume.spacing] : volume.spacing,
             origin: volume.origin,
             direction: volume.direction,
           });
-          if (cur && computedZSpacing && Math.abs(cur[2] - computedZSpacing) > 0.01) {
-            console.warn(
-              '[cbct] overriding Z spacing', cur[2], '→', computedZSpacing,
-              '(volume auto-detect disagreed with sortImageIdsAndGetSpacing)'
-            );
-            volume.spacing = [cur[0], cur[1], computedZSpacing];
-            // Push the change into the underlying vtkImageData so renders
-            // pick it up. v4's volume keeps a vtkImageData mirror of these.
-            try {
-              if (volume.imageData?.setSpacing) {
-                volume.imageData.setSpacing(cur[0], cur[1], computedZSpacing);
-                volume.imageData.modified?.();
-              }
-            } catch {}
-          }
-        } catch (geomErr) {
-          console.warn('[cbct] geometry sanity check failed:', geomErr?.message);
-        }
+        } catch {}
 
         // Build rendering engine + viewports
         let engine = cornerstone.getRenderingEngine(RENDERING_ENGINE_ID);

@@ -2,42 +2,52 @@
  * DicomViewerPage — 2D DICOM viewer for X-rays, panoramic, periapical,
  * mammography, US, and CBCT series stack-scrolling.
  *
+ * Stage B.3.2 (this revision): Cornerstone3D StackViewport.
+ * Replaces the V1 dicom-parser-only renderer because the V1 couldn't
+ * decode compressed transfer syntaxes (JPEG 2000, JPEG-LS,
+ * JPEG-Lossless) which are what every modern CBCT / mammography /
+ * many panoramic machines emit.
+ *
  * URL contract:
- *   /viewer/dicom?id=<patient_files.id>     single DICOM file by id
- *   /viewer/dicom?path=<bucket/key>         direct path
+ *   /viewer/dicom?id=<patient_files.id>      single DICOM file by id
+ *   /viewer/dicom?path=<bucket/key>          direct path
  *   /viewer/dicom?study=<imaging_studies.id> CBCT / multi-instance series
- *   /viewer/dicom?demo=1                    demo (deferred — needs sample)
- *
- * Stage B.3 V1 — uncompressed transfer syntaxes only. Compressed support
- * (JPEG-Lossless / JPEG-LS / JPEG-2000 / RLE) needs Cornerstone3D and ships
- * in B.3.2.
- *
- * Layout: full-screen dark canvas (medical convention) with overlay HUDs:
- *   - Top-left:  patient/study metadata
- *   - Top-right: modality + dimensions
- *   - Right rail: W/L sliders + presets, frame slider for multi-frame, reset
- *   - Bottom:    instructions
  */
 
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { useSearchParams, Link, useNavigate, useLocation } from 'react-router-dom';
-import { Loader2, AlertCircle, ArrowLeft, ExternalLink, Sun, RotateCcw, Camera } from 'lucide-react';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { useSearchParams, useNavigate, useLocation } from 'react-router-dom';
+import { Loader2, AlertCircle, ArrowLeft, Sun, RotateCcw, Camera } from 'lucide-react';
 import { resolveSignedUrl, resolveStudyDicomFiles } from '../lib/signedUrl';
-import { loadDicom, WL_PRESETS } from '../lib/dicomLoader';
+import { initCornerstone, imageIdFromSignedUrl, cornerstone, cornerstoneTools } from '../lib/cornerstoneInit';
 import { supabase } from '../lib/supabase';
 
 const SHELL_BG = '#0b0d10';
 const PANEL_BG = '#15181c';
 const ACCENT   = '#9C8562';
 
-function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+const RENDERING_ENGINE_ID = 'aihRenderingEngine';
+const VIEWPORT_ID         = 'STACK_VIEWPORT';
+const TOOL_GROUP_ID       = 'aihToolGroup';
+
+// Modality-aware W/L presets. Cornerstone's voiRange takes lower/upper
+// in the same units as the rescaled pixel values (Hounsfield for CT).
+const WL_PRESETS_BY_MODALITY = {
+  CT: [
+    { name: 'Soft Tissue', wc:   40, ww:  400 },
+    { name: 'Lung',        wc: -600, ww: 1500 },
+    { name: 'Bone',        wc:  400, ww: 2000 },
+    { name: 'Brain',       wc:   40, ww:   80 },
+    { name: 'Abdomen',     wc:   60, ww:  400 },
+    { name: 'Mediastinum', wc:   50, ww:  350 },
+  ],
+  MR: [{ name: 'Default', wc: 600, ww: 1600 }],
+  DEFAULT: [],
+};
 
 function formatPatientName(name) {
   if (!name) return null;
-  // DICOM PN format is "Family^Given^Middle" — convert to display form
   return name.split('^').filter(Boolean).join(' ');
 }
-
 function formatDate(yyyymmdd) {
   if (!yyyymmdd || yyyymmdd.length < 8) return yyyymmdd;
   return `${yyyymmdd.slice(0,4)}-${yyyymmdd.slice(4,6)}-${yyyymmdd.slice(6,8)}`;
@@ -52,43 +62,25 @@ export default function DicomViewerPage() {
   const studyId  = searchParams.get('study');
   const isDemo   = searchParams.get('demo') === '1';
 
-  const [loadStage, setLoadStage] = useState('init'); // init | fetching | parsing | ready | error
+  const [stage, setStage] = useState('init'); // init | fetching | rendering | ready | error
   const [error, setError] = useState(null);
-  const [dicom, setDicom] = useState(null);    // result of loadDicom (current instance)
-
-  // Multi-instance state — set when study= mode resolves a series.
-  const [instances, setInstances] = useState(null); // null = single-file mode
+  const [imageIds, setImageIds] = useState([]);
   const [instanceIdx, setInstanceIdx] = useState(0);
-  const [instanceLoading, setInstanceLoading] = useState(false);
-  // Tiny in-memory cache so back-and-forth scrolling doesn't re-fetch.
-  // 30 frames * ~500KB each = ~15MB ceiling.
-  const dicomCacheRef = useRef(new Map());
-
-  // Display state
+  const [imageMeta, setImageMeta] = useState(null); // metadata of current image
   const [windowCenter, setWindowCenter] = useState(40);
   const [windowWidth,  setWindowWidth]  = useState(400);
-  const [frameIndex,   setFrameIndex]   = useState(0);
-  const [zoom,    setZoom]    = useState(1);
-  const [panX,    setPanX]    = useState(0);
-  const [panY,    setPanY]    = useState(0);
-  const [invert,  setInvert]  = useState(false);
-  const wlInitialized = useRef(false); // remember user's WL across stack scroll
+  const [invert, setInvert] = useState(false);
 
-  // Refs for canvas + offscreen pixel buffer
-  const canvasRef       = useRef(null);
-  const offscreenCanvas = useRef(null);  // raw-DICOM-resolution canvas
-  const imageDataRef    = useRef(null);
-  const isPanning       = useRef(false);
-  const lastPan         = useRef({ x: 0, y: 0 });
-  const wlDragging      = useRef(false);
-  const wlStart         = useRef({ x: 0, y: 0, wc: 0, ww: 0 });
+  const viewportContainerRef = useRef(null);
+  const renderingEngineRef = useRef(null);
+  const viewportRef = useRef(null);
 
-  // Auth gate (study/id paths require auth) + signed URL resolution
+  // Resolve URLs based on URL contract
   useEffect(() => {
     document.title = 'DICOM viewer · aiHealth Imaging';
     let cancelled = false;
     (async () => {
-      setLoadStage('fetching');
+      setStage('fetching');
       setError(null);
       try {
         if (!isDemo) {
@@ -99,186 +91,218 @@ export default function DicomViewerPage() {
             return;
           }
         }
-        if (isDemo) {
-          throw new Error('Demo mode for DICOM not wired yet — drop a sample DICOM in test-fixtures/ first.');
-        }
+        if (isDemo) throw new Error('Demo mode for DICOM not wired yet.');
         if (!fileId && !filePath && !studyId) {
-          throw new Error('No DICOM source specified. URL must include ?id=<file_id>, ?path=<bucket/key>, or ?study=<study_id>.');
+          throw new Error('Missing ?id=, ?path=, or ?study= URL parameter.');
         }
 
-        // Multi-instance series mode — resolve the list, then load
-        // instance 0. Subsequent instances are loaded lazily by the
-        // instanceIdx effect below when the user scrolls the slider.
+        let urls = [];
         if (studyId) {
           const list = await resolveStudyDicomFiles(studyId);
-          if (cancelled) return;
-          // Reset the cache for a fresh study load
-          dicomCacheRef.current = new Map();
-          wlInitialized.current = false;
-          setInstances(list);
-          setInstanceIdx(0);
-          // The instanceIdx effect will handle the actual fetch + parse.
-          // We mark loadStage 'ready' here and let the per-instance loader
-          // flip the canvas + dicom state once the first frame is in.
-          // Nothing else to do in this effect — early return.
-          return;
+          urls = list.map((f) => f.url);
+        } else {
+          const { url } = await resolveSignedUrl({ id: fileId, path: filePath });
+          urls = [url];
         }
-
-        // Single-file mode (legacy)
-        const { url } = await resolveSignedUrl({ id: fileId, path: filePath });
         if (cancelled) return;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`Fetch failed: HTTP ${res.status}`);
-        const buf = await res.arrayBuffer();
-        if (cancelled) return;
-
-        setLoadStage('parsing');
-        const parsed = await loadDicom(buf);
-        if (cancelled) return;
-
-        applyParsedDicom(parsed, /* isFirstOfSeries */ true);
-        setLoadStage('ready');
+        setImageIds(urls.map(imageIdFromSignedUrl));
+        setInstanceIdx(0);
       } catch (err) {
         if (cancelled) return;
         setError(err?.message || String(err));
-        setLoadStage('error');
+        setStage('error');
       }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileId, filePath, studyId, isDemo, navigate]);
+  }, [fileId, filePath, studyId, isDemo]);
 
-  // Apply a parsed DICOM as the current displayed image. Sets up the
-  // offscreen canvas at native resolution + initializes W/L on the first
-  // frame of a series only (so user-tweaked W/L persists across scroll).
-  function applyParsedDicom(parsed, isFirstOfSeries) {
-    if (isFirstOfSeries && !wlInitialized.current) {
-      setWindowCenter(parsed.defaultWindowCenter);
-      setWindowWidth(parsed.defaultWindowWidth);
-      setFrameIndex(0);
-      setZoom(1);
-      setPanX(0);
-      setPanY(0);
-      setInvert(false);
-      wlInitialized.current = true;
-    }
-    const ocan = document.createElement('canvas');
-    ocan.width  = parsed.meta.columns;
-    ocan.height = parsed.meta.rows;
-    offscreenCanvas.current = ocan;
-    const octx = ocan.getContext('2d');
-    imageDataRef.current = octx.createImageData(parsed.meta.columns, parsed.meta.rows);
-    setDicom(parsed);
-  }
-
-  // Lazy per-instance loader for multi-instance series mode. Caches up to
-  // 30 parsed instances; on cache miss, fetches + parses just that one.
+  // Initialise Cornerstone + create viewport once imageIds resolved
   useEffect(() => {
-    if (!instances || instances.length === 0) return;
-    const idx = Math.max(0, Math.min(instanceIdx, instances.length - 1));
+    if (imageIds.length === 0) return;
     let cancelled = false;
-    const cached = dicomCacheRef.current.get(idx);
-    if (cached) {
-      applyParsedDicom(cached, idx === 0);
-      setLoadStage('ready');
-      return;
-    }
     (async () => {
-      setInstanceLoading(true);
+      setStage('rendering');
       try {
-        const url = instances[idx].url;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`Fetch failed for instance ${idx}: HTTP ${res.status}`);
-        const buf = await res.arrayBuffer();
+        await initCornerstone();
         if (cancelled) return;
-        const parsed = await loadDicom(buf);
-        if (cancelled) return;
-        // LRU-ish trim: 30 frames = ~15MB at typical CBCT slice size
-        dicomCacheRef.current.set(idx, parsed);
-        if (dicomCacheRef.current.size > 30) {
-          const firstKey = dicomCacheRef.current.keys().next().value;
-          if (firstKey !== idx) dicomCacheRef.current.delete(firstKey);
+
+        const element = viewportContainerRef.current;
+        if (!element) return;
+
+        // Reuse rendering engine across re-mounts if possible
+        let engine = cornerstone.getRenderingEngine(RENDERING_ENGINE_ID);
+        if (!engine) {
+          engine = new cornerstone.RenderingEngine(RENDERING_ENGINE_ID);
         }
-        applyParsedDicom(parsed, idx === 0);
-        setLoadStage('ready');
+        renderingEngineRef.current = engine;
+
+        // Enable element as a STACK viewport
+        engine.enableElement({
+          viewportId: VIEWPORT_ID,
+          element,
+          type: cornerstone.Enums.ViewportType.STACK,
+        });
+        const viewport = engine.getViewport(VIEWPORT_ID);
+        viewportRef.current = viewport;
+
+        await viewport.setStack(imageIds, 0);
+        viewport.render();
+
+        // Set up tool group + bindings (idempotent: destroy if already exists)
+        const existingGroup = cornerstoneTools.ToolGroupManager.getToolGroup(TOOL_GROUP_ID);
+        if (existingGroup) {
+          cornerstoneTools.ToolGroupManager.destroyToolGroup(TOOL_GROUP_ID);
+        }
+        const toolGroup = cornerstoneTools.ToolGroupManager.createToolGroup(TOOL_GROUP_ID);
+
+        const tools = [
+          cornerstoneTools.WindowLevelTool,
+          cornerstoneTools.PanTool,
+          cornerstoneTools.ZoomTool,
+          cornerstoneTools.StackScrollMouseWheelTool,
+        ];
+        for (const T of tools) cornerstoneTools.addTool(T);
+
+        toolGroup.addTool(cornerstoneTools.WindowLevelTool.toolName);
+        toolGroup.addTool(cornerstoneTools.PanTool.toolName);
+        toolGroup.addTool(cornerstoneTools.ZoomTool.toolName);
+        toolGroup.addTool(cornerstoneTools.StackScrollMouseWheelTool.toolName);
+
+        // Mouse bindings — radiology convention:
+        //   right-drag  = window/level
+        //   middle-drag = pan
+        //   wheel       = stack scroll
+        //   left-drag   = zoom (closer to dental-CAD; user-overridable later)
+        toolGroup.setToolActive(cornerstoneTools.WindowLevelTool.toolName, {
+          bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Secondary }],
+        });
+        toolGroup.setToolActive(cornerstoneTools.PanTool.toolName, {
+          bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Auxiliary }],
+        });
+        toolGroup.setToolActive(cornerstoneTools.ZoomTool.toolName, {
+          bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
+        });
+        toolGroup.setToolActive(cornerstoneTools.StackScrollMouseWheelTool.toolName);
+
+        toolGroup.addViewport(VIEWPORT_ID, RENDERING_ENGINE_ID);
+
+        // Listen for image changes so the slice slider + HUD stay synced
+        const handleImageRendered = () => {
+          if (!viewportRef.current) return;
+          const v = viewportRef.current;
+          const idx = v.getCurrentImageIdIndex();
+          setInstanceIdx(idx);
+          const props = v.getProperties();
+          if (props?.voiRange) {
+            const lower = props.voiRange.lower;
+            const upper = props.voiRange.upper;
+            setWindowCenter(Math.round((lower + upper) / 2));
+            setWindowWidth(Math.round(upper - lower));
+          }
+          // Pull metadata for HUD
+          const imageId = v.getCurrentImageId();
+          if (imageId && cornerstone.metaData) {
+            const generalSeries = cornerstone.metaData.get('generalSeriesModule', imageId) || {};
+            const generalStudy  = cornerstone.metaData.get('generalStudyModule', imageId)  || {};
+            const patientStudy  = cornerstone.metaData.get('patientStudyModule', imageId)  || {};
+            const patient       = cornerstone.metaData.get('patientModule', imageId)       || {};
+            const imagePlane    = cornerstone.metaData.get('imagePlaneModule', imageId)    || {};
+            setImageMeta({
+              patientName:  formatPatientName(patient.patientName),
+              patientId:    patient.patientId,
+              studyDate:    formatDate(generalStudy.studyDate),
+              studyDescription: generalStudy.studyDescription,
+              modality:     generalSeries.modality,
+              seriesDescription: generalSeries.seriesDescription,
+              rows:         imagePlane.rows,
+              columns:      imagePlane.columns,
+            });
+          }
+        };
+
+        element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED, handleImageRendered);
+        // Trigger a synthetic refresh of the HUD after first render
+        setTimeout(handleImageRendered, 100);
+
+        setStage('ready');
+
+        // Cleanup: detach listener on unmount or re-init
+        return () => {
+          element.removeEventListener(cornerstone.Enums.Events.IMAGE_RENDERED, handleImageRendered);
+        };
       } catch (err) {
         if (cancelled) return;
+        console.error('Cornerstone init/render failed:', err);
         setError(err?.message || String(err));
-        setLoadStage('error');
-      } finally {
-        if (!cancelled) setInstanceLoading(false);
+        setStage('error');
       }
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instances, instanceIdx]);
+  }, [imageIds]);
 
-  // Render the current frame to canvas whenever W/L, frame, or zoom changes
-  useEffect(() => {
-    if (loadStage !== 'ready' || !dicom) return;
-    const off = offscreenCanvas.current;
-    const onCanvas = canvasRef.current;
-    if (!off || !onCanvas) return;
-
-    // Rasterize raw-resolution frame into offscreen ImageData
-    const id = imageDataRef.current;
-    dicom.renderFrame(frameIndex, windowCenter, windowWidth, id);
-    if (invert) {
-      // Invert via per-pixel flip on the rasterized RGBA. (loadDicom already
-      // handles MONOCHROME1; this lets the user override.)
-      const d = id.data;
-      for (let i = 0; i < d.length; i += 4) {
-        d[i] = 255 - d[i];
-        d[i + 1] = d[i];
-        d[i + 2] = d[i];
-      }
+  // Sync slice slider -> viewport
+  const onSliceChange = useCallback((idx) => {
+    setInstanceIdx(idx);
+    if (viewportRef.current) {
+      viewportRef.current.setImageIdIndex(idx);
+      viewportRef.current.render();
     }
-    const octx = off.getContext('2d');
-    octx.putImageData(id, 0, 0);
-
-    // Composite to the visible canvas with zoom + pan (CSS-pixel canvas)
-    const ctx = onCanvas.getContext('2d');
-    const cw = onCanvas.width;
-    const ch = onCanvas.height;
-    ctx.fillStyle = SHELL_BG;
-    ctx.fillRect(0, 0, cw, ch);
-
-    // Fit-to-screen scale factor
-    const fitScale = Math.min(cw / dicom.meta.columns, ch / dicom.meta.rows) * 0.95;
-    const scale = fitScale * zoom;
-    const drawW = dicom.meta.columns * scale;
-    const drawH = dicom.meta.rows * scale;
-    const drawX = (cw - drawW) / 2 + panX;
-    const drawY = (ch - drawH) / 2 + panY;
-
-    ctx.imageSmoothingEnabled = scale < 2; // crisp pixels when zoomed in
-    ctx.drawImage(off, drawX, drawY, drawW, drawH);
-  }, [dicom, loadStage, windowCenter, windowWidth, frameIndex, zoom, panX, panY, invert]);
-
-  // Resize visible canvas to window
-  useEffect(() => {
-    const onResize = () => {
-      const c = canvasRef.current;
-      if (!c) return;
-      c.width  = c.clientWidth  * window.devicePixelRatio;
-      c.height = c.clientHeight * window.devicePixelRatio;
-      // Force a re-render
-      setPanX((v) => v);
-    };
-    onResize();
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
   }, []);
 
-  // Keyboard scrolling for the instance stack — Up/Down arrows move one
-  // slice at a time; PageUp/PageDown move 10 at a time. Standard radiology
-  // workstation interaction.
+  // Apply a W/L preset
+  const applyPreset = useCallback(({ wc, ww }) => {
+    if (!viewportRef.current) return;
+    viewportRef.current.setProperties({
+      voiRange: { lower: wc - ww / 2, upper: wc + ww / 2 },
+    });
+    viewportRef.current.render();
+    setWindowCenter(wc);
+    setWindowWidth(ww);
+  }, []);
+
+  // Manual W/L from sliders
+  const onWindowChange = useCallback((wc, ww) => {
+    if (!viewportRef.current) return;
+    viewportRef.current.setProperties({
+      voiRange: { lower: wc - ww / 2, upper: wc + ww / 2 },
+    });
+    viewportRef.current.render();
+    setWindowCenter(wc);
+    setWindowWidth(ww);
+  }, []);
+
+  const toggleInvert = useCallback(() => {
+    if (!viewportRef.current) return;
+    const next = !invert;
+    viewportRef.current.setProperties({ invert: next });
+    viewportRef.current.render();
+    setInvert(next);
+  }, [invert]);
+
+  const resetView = useCallback(() => {
+    if (!viewportRef.current) return;
+    viewportRef.current.resetCamera();
+    viewportRef.current.resetProperties();
+    viewportRef.current.render();
+  }, []);
+
+  const saveScreenshot = useCallback(() => {
+    if (!viewportRef.current) return;
+    const canvas = viewportRef.current.getCanvas();
+    const url = canvas.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dicom-${Date.now()}.png`;
+    a.click();
+  }, []);
+
+  // Keyboard slice navigation
   useEffect(() => {
-    if (!instances || instances.length <= 1) return;
+    if (imageIds.length <= 1) return;
     const onKey = (e) => {
-      // Don't interfere with typing in inputs.
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      const N = instances.length;
+      const N = imageIds.length;
       let next = instanceIdx;
       if (e.key === 'ArrowDown' || e.key === 'ArrowRight') next = Math.min(N - 1, instanceIdx + 1);
       else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') next = Math.max(0, instanceIdx - 1);
@@ -288,291 +312,195 @@ export default function DicomViewerPage() {
       else if (e.key === 'End') next = N - 1;
       else return;
       e.preventDefault();
-      setInstanceIdx(next);
+      onSliceChange(next);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [instances, instanceIdx]);
+  }, [imageIds.length, instanceIdx, onSliceChange]);
 
-  // Mouse handlers — left-drag pan, right-drag W/L, wheel zoom
-  const onCanvasMouseDown = useCallback((e) => {
-    e.preventDefault();
-    if (e.button === 0) {
-      isPanning.current = true;
-      lastPan.current = { x: e.clientX, y: e.clientY };
-    } else if (e.button === 2) {
-      wlDragging.current = true;
-      wlStart.current = { x: e.clientX, y: e.clientY, wc: windowCenter, ww: windowWidth };
-    }
-  }, [windowCenter, windowWidth]);
-
-  const onCanvasMouseMove = useCallback((e) => {
-    if (isPanning.current) {
-      const dx = e.clientX - lastPan.current.x;
-      const dy = e.clientY - lastPan.current.y;
-      lastPan.current = { x: e.clientX, y: e.clientY };
-      setPanX((p) => p + dx);
-      setPanY((p) => p + dy);
-    } else if (wlDragging.current) {
-      const dx = e.clientX - wlStart.current.x;
-      const dy = e.clientY - wlStart.current.y;
-      // Horizontal = window width, vertical = window center (DICOM convention)
-      const range = (dicom?.pixelRange?.max ?? 4095) - (dicom?.pixelRange?.min ?? 0);
-      const wwScale = Math.max(1, range / 500);
-      const wcScale = Math.max(1, range / 500);
-      setWindowWidth((w) => Math.max(1, w + dx * wwScale));
-      setWindowCenter((c) => c + dy * wcScale);
-    }
-  }, [dicom]);
-
-  const onCanvasMouseUp = useCallback(() => {
-    isPanning.current = false;
-    wlDragging.current = false;
-  }, []);
-
-  const onCanvasWheel = useCallback((e) => {
-    e.preventDefault();
-    setZoom((z) => clamp(z * (e.deltaY < 0 ? 1.1 : 1 / 1.1), 0.1, 30));
-  }, []);
-
-  const onCanvasContextMenu = useCallback((e) => e.preventDefault(), []);
-
-  const resetView = useCallback(() => {
-    if (!dicom) return;
-    setWindowCenter(dicom.defaultWindowCenter);
-    setWindowWidth(dicom.defaultWindowWidth);
-    setZoom(1);
-    setPanX(0);
-    setPanY(0);
-  }, [dicom]);
-
-  const screenshot = useCallback(() => {
-    const c = canvasRef.current;
-    if (!c) return;
-    const link = document.createElement('a');
-    link.download = `dicom-${dicom?.meta?.modality || 'image'}-${Date.now()}.png`;
-    link.href = c.toDataURL('image/png');
-    link.click();
-  }, [dicom]);
-
-  const presets = useMemo(() => {
-    const mod = (dicom?.meta?.modality || '').toUpperCase();
-    return WL_PRESETS[mod] || WL_PRESETS.DEFAULT;
-  }, [dicom]);
-
-  // ──────────────────────────────────────────────────────────────────
-  // Render
-  // ──────────────────────────────────────────────────────────────────
-  if (loadStage === 'init' || loadStage === 'fetching' || loadStage === 'parsing') {
-    return (
-      <div style={{ height: '100vh', backgroundColor: SHELL_BG }} className="flex items-center justify-center text-white">
-        <div className="flex flex-col items-center gap-3">
-          <Loader2 size={28} className="animate-spin" style={{ color: ACCENT }} />
-          <div className="text-sm">
-            {loadStage === 'fetching' && 'Fetching DICOM…'}
-            {loadStage === 'parsing'  && 'Parsing image…'}
-            {loadStage === 'init'     && 'Initialising…'}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (loadStage === 'error') {
-    return (
-      <div style={{ height: '100vh', backgroundColor: SHELL_BG }} className="flex items-center justify-center text-white p-6">
-        <div className="max-w-md w-full text-center flex flex-col items-center gap-4">
-          <AlertCircle size={28} className="text-red-500" />
-          <div>
-            <p className="text-sm font-medium">Could not load DICOM</p>
-            <p className="text-xs text-gray-400 font-mono break-words mt-2">{error}</p>
-          </div>
-          <p className="text-[11.5px] text-gray-400 leading-relaxed mt-2">
-            URL contract: <code className="font-mono text-amber-400">?id=&lt;file_id&gt;</code> or{' '}
-            <code className="font-mono text-amber-400">?path=&lt;bucket/key&gt;</code>.
-          </p>
-          <Link to="/" className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] border border-gray-700 hover:border-amber-500/40 mt-2">
-            <ArrowLeft size={12} /> Home
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
-  const m = dicom.meta;
-  const totalFrames = m.numberOfFrames || 1;
+  const presets = WL_PRESETS_BY_MODALITY[imageMeta?.modality] || WL_PRESETS_BY_MODALITY.DEFAULT;
 
   return (
-    <div className="relative" style={{ height: '100vh', backgroundColor: SHELL_BG, overflow: 'hidden', userSelect: 'none' }}>
-      {/* Canvas */}
-      <canvas
-        ref={canvasRef}
-        onMouseDown={onCanvasMouseDown}
-        onMouseMove={onCanvasMouseMove}
-        onMouseUp={onCanvasMouseUp}
-        onMouseLeave={onCanvasMouseUp}
-        onWheel={onCanvasWheel}
-        onContextMenu={onCanvasContextMenu}
-        style={{
-          position: 'absolute', inset: 0, width: '100%', height: '100%',
-          cursor: isPanning.current ? 'grabbing' : (wlDragging.current ? 'crosshair' : 'grab'),
-        }}
-      />
-
-      {/* Top-left HUD: patient + study */}
-      <div className="absolute top-3 left-3 text-white text-[12px] leading-snug font-mono pointer-events-none">
-        {formatPatientName(m.patientName) && <div>{formatPatientName(m.patientName)}</div>}
-        {m.patientId && <div className="text-gray-400">ID: {m.patientId}</div>}
-        {m.studyDate && <div className="text-gray-400">{formatDate(m.studyDate)}</div>}
-        {m.studyDescription && <div className="text-gray-400 mt-0.5">{m.studyDescription}</div>}
+    <div className="h-screen w-screen flex flex-col" style={{ backgroundColor: SHELL_BG, color: '#cdd2d8' }}>
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-2 border-b" style={{ borderColor: '#1d2128' }}>
+        <button
+          onClick={() => window.close() || navigate('/')}
+          className="text-sm px-2 py-1 rounded hover:bg-white/5 flex items-center gap-1.5"
+        >
+          <ArrowLeft size={14} /> Close
+        </button>
+        <div className="text-sm font-semibold tracking-wide">
+          DICOM Viewer
+          {imageIds.length > 1 && <span className="ml-2 text-[11px] text-gray-400 font-normal">({imageIds.length} slices)</span>}
+        </div>
+        <div className="text-[11px] text-gray-500">
+          Powered by Cornerstone3D
+        </div>
       </div>
 
-      {/* Top-right HUD: modality + dimensions */}
-      <div className="absolute top-3 right-3 text-white text-[12px] leading-snug font-mono text-right pointer-events-none">
-        {m.modality && <div className="font-semibold" style={{ color: ACCENT }}>{m.modality}</div>}
-        {m.bodyPart && <div className="text-gray-400">{m.bodyPart}</div>}
-        <div className="text-gray-400">{m.columns}×{m.rows}{totalFrames > 1 ? ` · ${totalFrames}f` : ''}</div>
-        {m.bitsStored && <div className="text-gray-400">{m.bitsStored}-bit</div>}
-      </div>
-
-      {/* Bottom HUD: W/L readout + instructions */}
-      <div className="absolute bottom-3 left-3 text-white text-[11px] leading-tight font-mono pointer-events-none">
-        <div>WC {Math.round(windowCenter)} · WW {Math.round(windowWidth)}</div>
-        <div className="text-gray-500 mt-1">Drag = pan · Right-drag = W/L · Wheel = zoom</div>
-      </div>
-
-      {/* Right rail: controls */}
-      <div
-        className="absolute top-16 right-3 w-60 p-3 rounded-lg text-white text-[12px]"
-        style={{ backgroundColor: PANEL_BG, border: '1px solid #25282d' }}
-      >
-        {/* Presets */}
-        {presets.length > 0 && (
-          <div className="mb-3">
-            <div className="text-[10px] uppercase tracking-wider text-gray-400 mb-1.5">Window presets</div>
-            <div className="grid grid-cols-2 gap-1">
-              {presets.map((p) => (
-                <button
-                  key={p.name}
-                  onClick={() => { setWindowCenter(p.wc); setWindowWidth(p.ww); }}
-                  className="text-[11px] py-1 rounded bg-gray-800 hover:bg-gray-700"
-                >
-                  {p.name}
-                </button>
-              ))}
+      <div className="flex-1 flex relative">
+        {/* Loading overlay */}
+        {(stage === 'fetching' || stage === 'rendering') && (
+          <div className="absolute inset-0 flex items-center justify-center z-20" style={{ backgroundColor: 'rgba(11,13,16,0.95)' }}>
+            <div className="flex flex-col items-center gap-3">
+              <Loader2 size={28} className="animate-spin text-amber-500" />
+              <p className="text-xs text-gray-400">
+                {stage === 'fetching' ? 'Resolving signed URLs…' : 'Initialising Cornerstone3D…'}
+              </p>
             </div>
           </div>
         )}
 
-        {/* W/L sliders */}
-        <div className="mb-3">
-          <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400 mb-1">
-            <span>Window center</span>
-            <span className="tabular-nums text-gray-300">{Math.round(windowCenter)}</span>
+        {/* Error overlay */}
+        {stage === 'error' && (
+          <div className="absolute inset-0 flex items-center justify-center z-30 p-8" style={{ backgroundColor: 'rgba(11,13,16,0.97)' }}>
+            <div className="max-w-md text-center">
+              <AlertCircle size={28} className="mx-auto text-red-500 mb-3" />
+              <h2 className="text-sm font-semibold text-white mb-2">Could not load DICOM</h2>
+              <pre className="text-[11px] text-red-300 font-mono whitespace-pre-wrap break-words text-left px-3 py-2 rounded" style={{ backgroundColor: '#1a1d22' }}>
+                {error}
+              </pre>
+            </div>
           </div>
-          <input
-            type="range"
-            min={dicom.pixelRange.min}
-            max={dicom.pixelRange.max}
-            step={1}
-            value={windowCenter}
-            onChange={(e) => setWindowCenter(Number(e.target.value))}
-            className="w-full"
-          />
-        </div>
-        <div className="mb-3">
-          <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400 mb-1">
-            <span>Window width</span>
-            <span className="tabular-nums text-gray-300">{Math.round(windowWidth)}</span>
-          </div>
-          <input
-            type="range"
-            min={1}
-            max={Math.max(1, (dicom.pixelRange.max - dicom.pixelRange.min) * 2)}
-            step={1}
-            value={windowWidth}
-            onChange={(e) => setWindowWidth(Number(e.target.value))}
-            className="w-full"
-          />
-        </div>
+        )}
 
-        {/* Frame slider for multi-frame inside ONE DICOM file */}
-        {totalFrames > 1 && (
-          <div className="mb-3">
+        {/* Cornerstone viewport */}
+        <div
+          ref={viewportContainerRef}
+          className="flex-1 relative"
+          style={{ backgroundColor: SHELL_BG }}
+          onContextMenu={(e) => e.preventDefault()}
+        />
+
+        {/* HUD overlays — only visible once ready */}
+        {stage === 'ready' && imageMeta && (
+          <>
+            <div className="absolute top-3 left-3 text-[11px] leading-tight font-mono pointer-events-none" style={{ color: '#cdd2d8', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
+              {imageMeta.patientName && <div className="text-white">{imageMeta.patientName}</div>}
+              {imageMeta.patientId && <div>ID: {imageMeta.patientId}</div>}
+              {imageMeta.studyDate && <div>{imageMeta.studyDate}</div>}
+              {imageMeta.studyDescription && <div className="text-gray-400">{imageMeta.studyDescription}</div>}
+            </div>
+            <div className="absolute top-3 right-3 text-[11px] leading-tight font-mono text-right pointer-events-none" style={{ color: '#cdd2d8', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
+              {imageMeta.modality && <div className="text-amber-400 font-semibold">{imageMeta.modality}</div>}
+              {imageMeta.seriesDescription && <div className="text-gray-300">{imageMeta.seriesDescription}</div>}
+              {imageMeta.rows && imageMeta.columns && <div>{imageMeta.columns}×{imageMeta.rows}</div>}
+              {imageIds.length > 1 && (
+                <div>Slice {instanceIdx + 1} / {imageIds.length}</div>
+              )}
+            </div>
+            <div className="absolute bottom-3 left-3 text-[11px] font-mono pointer-events-none" style={{ color: '#9aa1ab', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
+              WC: {Math.round(windowCenter)}  WW: {Math.round(windowWidth)}
+              <span className="ml-3 text-gray-500">left=zoom · right=W/L · wheel=scroll · middle=pan</span>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Right rail */}
+      {stage === 'ready' && (
+        <div
+          className="absolute right-3 top-16 w-60 rounded-lg p-3 z-10 text-xs"
+          style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128' }}
+        >
+          {presets.length > 0 && (
+            <>
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Presets</div>
+              <div className="grid grid-cols-2 gap-1 mb-3">
+                {presets.map((p) => (
+                  <button
+                    key={p.name}
+                    onClick={() => applyPreset(p)}
+                    className="text-[11px] py-1.5 rounded bg-gray-800 hover:bg-gray-700"
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          <div className="mb-2">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400 mb-1">
-              <span>Frame</span>
-              <span className="tabular-nums text-gray-300">{frameIndex + 1} / {totalFrames}</span>
+              <span>Window Center</span>
+              <span className="tabular-nums text-gray-300">{Math.round(windowCenter)}</span>
             </div>
             <input
               type="range"
-              min={0}
-              max={totalFrames - 1}
+              min={-1000}
+              max={3000}
               step={1}
-              value={frameIndex}
-              onChange={(e) => setFrameIndex(Number(e.target.value))}
+              value={windowCenter}
+              onChange={(e) => onWindowChange(Number(e.target.value), windowWidth)}
               className="w-full"
             />
           </div>
-        )}
 
-        {/* Instance slider for multi-instance series (CBCT, CT volume) */}
-        {instances && instances.length > 1 && (
           <div className="mb-3">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400 mb-1">
-              <span>Slice</span>
-              <span className="tabular-nums text-gray-300">
-                {instanceIdx + 1} / {instances.length}
-                {instanceLoading && <span className="ml-1 text-amber-500">(loading…)</span>}
-              </span>
+              <span>Window Width</span>
+              <span className="tabular-nums text-gray-300">{Math.round(windowWidth)}</span>
             </div>
             <input
               type="range"
-              min={0}
-              max={instances.length - 1}
+              min={1}
+              max={4000}
               step={1}
-              value={instanceIdx}
-              onChange={(e) => setInstanceIdx(Number(e.target.value))}
+              value={windowWidth}
+              onChange={(e) => onWindowChange(windowCenter, Number(e.target.value))}
               className="w-full"
             />
-            <p className="text-[10px] text-gray-500 mt-1 leading-snug">
-              Drag the slider or press ↑/↓ to scroll the stack. Up to 30 frames cached.
-            </p>
           </div>
-        )}
 
-        <div className="grid grid-cols-3 gap-1">
-          <button
-            onClick={resetView}
-            className="text-[11px] py-1.5 rounded bg-gray-800 hover:bg-gray-700 flex items-center justify-center gap-1"
-            title="Reset W/L + zoom"
-          >
-            <RotateCcw size={11} /> Reset
-          </button>
-          <button
-            onClick={() => setInvert((i) => !i)}
-            className={`text-[11px] py-1.5 rounded flex items-center justify-center gap-1 ${invert ? 'bg-amber-600' : 'bg-gray-800 hover:bg-gray-700'}`}
-            title="Invert grayscale"
-          >
-            <Sun size={11} /> Invert
-          </button>
-          <button
-            onClick={screenshot}
-            className="text-[11px] py-1.5 rounded bg-gray-800 hover:bg-gray-700 flex items-center justify-center gap-1"
-            title="Download PNG"
-          >
-            <Camera size={11} /> Save
-          </button>
+          {imageIds.length > 1 && (
+            <div className="mb-3">
+              <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400 mb-1">
+                <span>Slice</span>
+                <span className="tabular-nums text-gray-300">
+                  {instanceIdx + 1} / {imageIds.length}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={imageIds.length - 1}
+                step={1}
+                value={instanceIdx}
+                onChange={(e) => onSliceChange(Number(e.target.value))}
+                className="w-full"
+              />
+              <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+                Wheel scrolls; ↑/↓ one slice; PgUp/PgDn ten.
+              </p>
+            </div>
+          )}
+
+          <div className="grid grid-cols-3 gap-1">
+            <button
+              onClick={resetView}
+              className="text-[11px] py-1.5 rounded bg-gray-800 hover:bg-gray-700 flex items-center justify-center gap-1"
+              title="Reset W/L + zoom"
+            >
+              <RotateCcw size={11} /> Reset
+            </button>
+            <button
+              onClick={toggleInvert}
+              className={`text-[11px] py-1.5 rounded flex items-center justify-center gap-1 ${invert ? 'bg-amber-600' : 'bg-gray-800 hover:bg-gray-700'}`}
+              title="Invert grayscale"
+            >
+              <Sun size={11} /> Invert
+            </button>
+            <button
+              onClick={saveScreenshot}
+              className="text-[11px] py-1.5 rounded bg-gray-800 hover:bg-gray-700 flex items-center justify-center gap-1"
+              title="Download as PNG"
+            >
+              <Camera size={11} /> Save
+            </button>
+          </div>
         </div>
-      </div>
-
-      {/* Close / home button */}
-      <button
-        onClick={() => window.close()}
-        className="absolute top-3 left-1/2 -translate-x-1/2 text-white text-[11px] px-3 py-1 rounded-full bg-gray-800 hover:bg-gray-700 flex items-center gap-1"
-        title="Close window"
-      >
-        <ExternalLink size={11} /> Close
-      </button>
+      )}
     </div>
   );
 }

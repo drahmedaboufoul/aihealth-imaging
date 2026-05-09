@@ -42,13 +42,20 @@ const RENDERING_ENGINE_ID = 'aihCbctRenderingEngine';
 const TOOL_GROUP_MPR_ID   = 'aihCbctMprToolGroup';
 const TOOL_GROUP_3D_ID    = 'aihCbct3dToolGroup';
 
-const VOLUME_PRESETS = [
+// Two preset tables — one for HU-scaled CT, one for raw 12-bit CBCT data
+// (most cone-beam scanners ship without rescale slope/intercept). We pick
+// which table to use based on the volume's actual data range after load.
+const VOLUME_PRESETS_HU = [
   { name: 'Bone',        wc:  400, ww: 2000 },
   { name: 'Soft Tissue', wc:   40, ww:  400 },
   { name: 'Lung',        wc: -600, ww: 1500 },
   { name: 'Brain',       wc:   40, ww:   80 },
   { name: 'Air',         wc: -400, ww: 1000 },
 ];
+// Raw-pixel presets are computed from the volume's [min, max] range — see
+// rawPresets() in the body. The names mirror the HU presets so the UI is
+// consistent regardless of the underlying scale.
+const PRESET_NAMES = ['Bone', 'Soft Tissue', 'Lung', 'Brain', 'Air'];
 
 const VIEWPORTS = [
   { id: 'CBCT_AXIAL',    label: 'Axial',     orientationKey: 'AXIAL',    color: '#10b981' },
@@ -62,6 +69,72 @@ const VIEWPORTS = [
 // panel).
 const MPR_VIEWPORT_IDS = ['CBCT_AXIAL', 'CBCT_CORONAL', 'CBCT_SAGITTAL'];
 
+/**
+ * Read the volume's actual scalar data range. Used to detect HU vs raw
+ * pixel scaling and to compute auto-W/L. Samples sparsely so we don't
+ * iterate 100M+ voxels on a typical CBCT.
+ */
+function readVolumeDataRange(volume) {
+  let scalarData = null;
+  try {
+    if (typeof volume?.getScalarData === 'function') {
+      scalarData = volume.getScalarData();
+    } else if (volume?.imageData?.getPointData) {
+      scalarData = volume.imageData.getPointData().getScalars().getData();
+    } else if (volume?.scalarData) {
+      scalarData = volume.scalarData;
+    }
+  } catch {}
+  if (!scalarData?.length) return null;
+  const SAMPLES = 100000;
+  const step = Math.max(1, Math.floor(scalarData.length / SAMPLES));
+  let min = Infinity;
+  let max = -Infinity;
+  const samples = [];
+  for (let i = 0; i < scalarData.length; i += step) {
+    const v = scalarData[i];
+    if (v < min) min = v;
+    if (v > max) max = v;
+    if (v !== 0) samples.push(v); // skip background for percentile calc
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+  // Percentile-based bounds for window auto-fit (1st / 99th)
+  let p1 = min;
+  let p99 = max;
+  if (samples.length > 100) {
+    samples.sort((a, b) => a - b);
+    p1  = samples[Math.floor(samples.length * 0.01)];
+    p99 = samples[Math.floor(samples.length * 0.99)];
+  }
+  return { min, max, p1, p99 };
+}
+
+/**
+ * Build presets for a raw-pixel volume (no modality LUT). We anchor "Bone"
+ * to the upper part of the data range and "Soft Tissue" to the middle, so
+ * the user gets a sensible default view regardless of the scanner's
+ * arbitrary scale.
+ */
+function rawPresetsForRange(range) {
+  if (!range) return VOLUME_PRESETS_HU;
+  const lo  = range.p1;
+  const hi  = range.p99;
+  const mid = (lo + hi) / 2;
+  const span = Math.max(1, hi - lo);
+  return [
+    // Bone — upper-half emphasis
+    { name: 'Bone',        wc: lo + span * 0.65, ww: span * 0.55 },
+    // Soft tissue — center, narrower window
+    { name: 'Soft Tissue', wc: mid,              ww: span * 0.40 },
+    // Lung-equivalent — lower bias, wide
+    { name: 'Lung',        wc: lo + span * 0.30, ww: span * 0.80 },
+    // Brain-equivalent — narrow, near-center
+    { name: 'Brain',       wc: mid,              ww: span * 0.18 },
+    // Air — low end
+    { name: 'Air',         wc: lo + span * 0.20, ww: span * 0.50 },
+  ];
+}
+
 export default function CBCTViewerPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -72,6 +145,7 @@ export default function CBCTViewerPage() {
   const [error, setError] = useState(null);
   const [progress, setProgress] = useState(0);
   const [activePreset, setActivePreset] = useState('Bone');
+  const [presetTable, setPresetTable] = useState(VOLUME_PRESETS_HU);
 
   const axialRef    = useRef(null);
   const coronalRef  = useRef(null);
@@ -180,9 +254,52 @@ export default function CBCTViewerPage() {
         }));
         engine.setViewports(viewportInputs);
 
-        // Pixels are already cached from the pre-load above; calling load()
-        // populates the volume's voxel buffer from those cached images. Fast.
-        volume.load();
+        // Wait for the volume's voxel buffer to be fully populated before
+        // we apply any properties or bind it to viewports. We attach the
+        // listener BEFORE calling load(), because the pre-loaded images
+        // mean load() can complete synchronously and we'd miss the event.
+        const volumeLoadComplete = new Promise((resolve) => {
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            try {
+              cornerstone.eventTarget.removeEventListener(
+                cornerstone.Enums.Events.IMAGE_VOLUME_LOADING_COMPLETED, handler
+              );
+            } catch {}
+            resolve();
+          };
+          const handler = (e) => {
+            const detail = e?.detail;
+            const vid = detail?.volumeId || detail?.imageVolume?.volumeId;
+            if (vid === volumeId) finish();
+          };
+          try {
+            cornerstone.eventTarget.addEventListener(
+              cornerstone.Enums.Events.IMAGE_VOLUME_LOADING_COMPLETED, handler
+            );
+          } catch {}
+          // Hard timeout — we have all images cached so this should never fire,
+          // but if cornerstone never emits the event we still want to render.
+          setTimeout(finish, 8000);
+        });
+        const loadResult = volume.load();
+        if (loadResult && typeof loadResult.then === 'function') {
+          await loadResult;
+        }
+        await volumeLoadComplete;
+        if (cancelled) return;
+
+        // Inspect the volume's actual data range so we can pick the correct
+        // window. CBCT scanners often skip the modality LUT, so pixel values
+        // arrive as raw 12-bit (0–4095ish) rather than HU (-1000–3000). The
+        // wrong default makes everything blow out white.
+        const dataRange = readVolumeDataRange(volume);
+        const isHU = dataRange ? (dataRange.min < -200) : true;
+        const presets = isHU ? VOLUME_PRESETS_HU : rawPresetsForRange(dataRange);
+        if (!cancelled) setPresetTable(presets);
+        const defaultPreset = presets.find((p) => p.name === 'Bone') || presets[0];
 
         // Bind the volume to all 4 viewports
         await cornerstone.setVolumesForViewports(
@@ -191,21 +308,25 @@ export default function CBCTViewerPage() {
           VIEWPORTS.map((v) => v.id),
         );
 
-        // Default bone window on MPR (CBCT looks like noise without it)
+        // Apply Bone window to the three MPR viewports.
         for (const id of MPR_VIEWPORT_IDS) {
           const vp = engine.getViewport(id);
-          vp.setProperties({ voiRange: { lower: 400 - 2000 / 2, upper: 400 + 2000 / 2 } });
+          if (!vp) continue;
+          vp.setProperties({
+            voiRange: {
+              lower: defaultPreset.wc - defaultPreset.ww / 2,
+              upper: defaultPreset.wc + defaultPreset.ww / 2,
+            },
+          });
         }
 
-        // Default CT-Bone preset on the 3D volume render
+        // 3D viewport: VOLUME_3D needs a transfer-function preset, NOT a
+        // voiRange — the latter has no effect on volume rendering. v4 ships
+        // built-in CT-* presets we can name directly.
         try {
           const vp3d = engine.getViewport('CBCT_3D');
-          if (vp3d && cornerstoneTools.utilities?.voi?.applyPreset) {
-            cornerstoneTools.utilities.voi.applyPreset(vp3d, 'CT-Bone');
-          } else if (vp3d?.setProperties) {
-            // Fallback: at minimum set a reasonable VOI range so the user
-            // sees something rather than a black box.
-            vp3d.setProperties({ voiRange: { lower: -600, upper: 1400 } });
+          if (vp3d?.setProperties) {
+            vp3d.setProperties({ preset: isHU ? 'CT-Bone' : 'CT-AAA' });
           }
         } catch (presetErr) {
           console.warn('[cbct] 3D preset apply failed:', presetErr?.message);
@@ -227,13 +348,7 @@ export default function CBCTViewerPage() {
         for (const T of mprTools) cornerstoneTools.addTool(T);
         try { cornerstoneTools.addTool(cornerstoneTools.TrackballRotateTool); } catch {}
 
-        // MPR bindings:
-        //   left-click on crosshair handle  -> CrosshairsTool (snaps cross-hairs across all 3)
-        //   right-click drag                 -> Window/Level
-        //   middle-click drag                -> Pan
-        //   wheel                            -> StackScroll within plane
-        //   The CrosshairsTool also handles its own "show reference lines"
-        //   so each panel labels which planes are crossing it.
+        // Configure tools on the group
         mprGroup.addTool(cornerstoneTools.WindowLevelTool.toolName);
         mprGroup.addTool(cornerstoneTools.PanTool.toolName);
         mprGroup.addTool(cornerstoneTools.ZoomTool.toolName);
@@ -247,6 +362,12 @@ export default function CBCTViewerPage() {
           getReferenceLineDraggableRotatable: () => true,
           getReferenceLineSlabThicknessControlsOn: () => false,
         });
+
+        // CRITICAL: viewports must be added to the group BEFORE setToolActive
+        // for CrosshairsTool — otherwise it warns "at least two viewports must
+        // be given" and the cross-hairs never wire up across panels.
+        for (const id of MPR_VIEWPORT_IDS) mprGroup.addViewport(id, RENDERING_ENGINE_ID);
+
         mprGroup.setToolActive(cornerstoneTools.CrosshairsTool.toolName, {
           bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
         });
@@ -259,18 +380,17 @@ export default function CBCTViewerPage() {
         mprGroup.setToolActive(cornerstoneTools.StackScrollTool.toolName, {
           bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Wheel }],
         });
-        for (const id of MPR_VIEWPORT_IDS) mprGroup.addViewport(id, RENDERING_ENGINE_ID);
 
         // 3D bindings: trackball rotate on primary, zoom on wheel.
         vrGroup.addTool(cornerstoneTools.TrackballRotateTool.toolName);
         vrGroup.addTool(cornerstoneTools.ZoomTool.toolName);
+        vrGroup.addViewport('CBCT_3D', RENDERING_ENGINE_ID);
         vrGroup.setToolActive(cornerstoneTools.TrackballRotateTool.toolName, {
           bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
         });
         vrGroup.setToolActive(cornerstoneTools.ZoomTool.toolName, {
           bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Wheel }],
         });
-        vrGroup.addViewport('CBCT_3D', RENDERING_ENGINE_ID);
 
         engine.render();
         setStage('ready');
@@ -378,7 +498,7 @@ export default function CBCTViewerPage() {
           >
             <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">MPR Window</div>
             <div className="grid grid-cols-2 gap-1 mb-3">
-              {VOLUME_PRESETS.map((p) => (
+              {presetTable.map((p) => (
                 <button
                   key={p.name}
                   onClick={() => applyPreset(p)}

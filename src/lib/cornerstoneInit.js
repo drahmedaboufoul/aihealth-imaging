@@ -26,6 +26,10 @@ import {
   AngleTool,
   BidirectionalTool,
   ProbeTool,
+  // Phase 2 region-of-interest tools (mean/min/max/stddev HU readout)
+  RectangleROITool,
+  CircleROITool,
+  EllipticalROITool,
   Enums as toolsEnums,
   utilities as toolsUtilities,
   synchronizers as toolsSynchronizers,
@@ -95,6 +99,10 @@ export const cornerstoneTools = {
   AngleTool,
   BidirectionalTool,
   ProbeTool,
+  // Phase 2 ROI tools
+  RectangleROITool,
+  CircleROITool,
+  EllipticalROITool,
   Enums: toolsEnums,
   utilities: toolsUtilities,
   synchronizers: toolsSynchronizers,  // VOI / camera / image-slice sync

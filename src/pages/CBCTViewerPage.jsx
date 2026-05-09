@@ -29,8 +29,9 @@ import {
   Loader2, AlertCircle, ArrowLeft, Box,
   Move, ZoomIn, RotateCcw,
   Ruler, Triangle, Crosshair as CrosshairIcon,
-  Activity, Trash2, Plus,
+  Activity, Trash2, Plus, Save, Sparkles,
   Eye, EyeOff, Contrast, Layers, ChevronRight,
+  Square, Circle as CircleIcon, Hexagon, Cylinder,
 } from 'lucide-react';
 import { resolveStudyDicomFiles, resolveStudyNiftiVolume } from '../lib/signedUrl';
 import { loadNiftiVolume } from '../lib/niftiLoader';
@@ -110,27 +111,48 @@ const VIEW_MODES = {
   },
   'pano': {
     name: 'Pano',
-    ready: false,
-    description: 'Reformatted panoramic — requires arch-curve tracing on axial. Phase 2.',
-    viewports: [],
+    ready: true,
+    layout: 'single',
+    description: 'Reformatted panoramic. Current: thick coronal MIP through the dental arch. v2: arch-curve tracing.',
+    viewports: [
+      { id: 'PANO_VIEW', label: 'Pano (coronal MIP)', orientationKey: 'CORONAL', color: '#10b981', kind: 'orthographic', slabMM: 30, blendMode: 'MIP' },
+    ],
   },
   'crosssec': {
     name: 'Cross-sections',
-    ready: false,
-    description: 'Perpendicular cross-sections along the arch curve. Phase 2.',
-    viewports: [],
+    ready: true,
+    layout: 'grid-2x2',
+    description: 'Cross-sections perpendicular to arch. Current: 4 slabbed coronals at fixed depths. v2: arch-curve sampling.',
+    viewports: [
+      { id: 'XS_1', label: 'Anterior',  orientationKey: 'CORONAL', color: '#10b981', kind: 'orthographic', slabMM: 2, blendMode: 'MIP' },
+      { id: 'XS_2', label: 'Premolar',  orientationKey: 'CORONAL', color: '#3b82f6', kind: 'orthographic', slabMM: 2, blendMode: 'MIP' },
+      { id: 'XS_3', label: 'Molar',     orientationKey: 'CORONAL', color: '#f59e0b', kind: 'orthographic', slabMM: 2, blendMode: 'MIP' },
+      { id: 'XS_4', label: 'Posterior', orientationKey: 'CORONAL', color: '#ef4444', kind: 'orthographic', slabMM: 2, blendMode: 'MIP' },
+    ],
   },
   'implant': {
     name: 'Implant',
-    ready: false,
-    description: 'Virtual implant placement with safety zones. Phase 3.',
-    viewports: [],
+    ready: true,
+    layout: 'grid-2x2',
+    description: 'Implant planning workspace. Use Length to measure available bone height. Cylinder placement coming Phase 3.',
+    viewports: [
+      { id: 'CBCT_AXIAL',    label: 'Axial',    orientationKey: 'AXIAL',    color: '#10b981', kind: 'orthographic' },
+      { id: 'CBCT_CORONAL',  label: 'Coronal',  orientationKey: 'CORONAL',  color: '#3b82f6', kind: 'orthographic' },
+      { id: 'CBCT_SAGITTAL', label: 'Sagittal', orientationKey: 'SAGITTAL', color: '#f59e0b', kind: 'orthographic' },
+      { id: 'CBCT_3D',       label: '3D',       orientationKey: 'CORONAL',  color: '#ef4444', kind: 'volume_3d' },
+    ],
   },
   'tmj': {
     name: 'TMJ',
-    ready: false,
-    description: 'Bilateral TMJ axials + corrected sagittals. Phase 3.',
-    viewports: [],
+    ready: true,
+    layout: 'grid-2x2',
+    description: 'TMJ workspace. 4 axial slices through condyles + corrected sagittals coming Phase 3.',
+    viewports: [
+      { id: 'TMJ_AX_R', label: 'Right Condyle (Ax)', orientationKey: 'AXIAL',   color: '#10b981', kind: 'orthographic' },
+      { id: 'TMJ_AX_L', label: 'Left Condyle (Ax)',  orientationKey: 'AXIAL',   color: '#3b82f6', kind: 'orthographic' },
+      { id: 'TMJ_COR_R', label: 'Right Condyle (Cor)', orientationKey: 'CORONAL', color: '#f59e0b', kind: 'orthographic' },
+      { id: 'TMJ_COR_L', label: 'Left Condyle (Cor)',  orientationKey: 'CORONAL', color: '#ef4444', kind: 'orthographic' },
+    ],
   },
 };
 
@@ -355,6 +377,10 @@ function initPrimaryToolMap() {
     angle:         cornerstoneTools.AngleTool.toolName,
     bidirectional: cornerstoneTools.BidirectionalTool.toolName,
     probe:         cornerstoneTools.ProbeTool.toolName,
+    // Phase 2 ROI tools — region-based density measurements (HU mean/min/max/stddev)
+    rectROI:       cornerstoneTools.RectangleROITool.toolName,
+    circleROI:     cornerstoneTools.CircleROITool.toolName,
+    ellipseROI:    cornerstoneTools.EllipticalROITool.toolName,
     pan:           cornerstoneTools.PanTool.toolName,
     zoom:          cornerstoneTools.ZoomTool.toolName,
   };
@@ -470,6 +496,10 @@ function setupCbctToolGroupsForMode(engine, modeCfg) {
     cornerstoneTools.StackScrollTool, cornerstoneTools.CrosshairsTool,
     cornerstoneTools.LengthTool, cornerstoneTools.AngleTool,
     cornerstoneTools.BidirectionalTool, cornerstoneTools.ProbeTool,
+    // Phase 2 region tools — density readout (HU stats over a region)
+    cornerstoneTools.RectangleROITool,
+    cornerstoneTools.CircleROITool,
+    cornerstoneTools.EllipticalROITool,
   ];
   for (const T of mprTools) cornerstoneTools.addTool(T);
   try { cornerstoneTools.addTool(cornerstoneTools.TrackballRotateTool); } catch {}
@@ -491,6 +521,9 @@ function setupCbctToolGroupsForMode(engine, modeCfg) {
   mprGroup.addTool(cornerstoneTools.AngleTool.toolName);
   mprGroup.addTool(cornerstoneTools.BidirectionalTool.toolName);
   mprGroup.addTool(cornerstoneTools.ProbeTool.toolName);
+  mprGroup.addTool(cornerstoneTools.RectangleROITool.toolName);
+  mprGroup.addTool(cornerstoneTools.CircleROITool.toolName);
+  mprGroup.addTool(cornerstoneTools.EllipticalROITool.toolName);
 
   // Add every orthographic viewport from this mode's config to the MPR
   // group, every volume_3d viewport to the 3D group.
@@ -628,6 +661,10 @@ export default function CBCTViewerPage() {
   // Annotation list (refreshed periodically while the user is drawing).
   // Each entry: { uid, toolName, displayText, viewportId }
   const [annotations, setAnnotations] = useState([]);
+
+  // AI segmentation modal — Phase 4 stub. Shows planned features and a
+  // status indicator so the user (and we) can see the roadmap.
+  const [showAiModal, setShowAiModal] = useState(false);
 
   // Cached volume + last loaded volumeId, for fast view-mode rebuilds
   // without reloading the volume.
@@ -1194,6 +1231,84 @@ export default function CBCTViewerPage() {
     setAnnotations([]);
   };
 
+  // ── Persist annotations ─────────────────────────────────────────────
+  // Save the current Cornerstone annotation state as JSON on the
+  // imaging_studies row. The shape is whatever cornerstoneTools.annotation
+  // .state.getAllAnnotations() returns — we don't transform it, so a
+  // future viewer can rehydrate exactly. RLS is already in place on
+  // imaging_studies so this respects clinic scoping.
+  const handleSaveMeasurements = useCallback(async () => {
+    if (!studyId) return;
+    try {
+      const all = cornerstoneTools.annotation?.state?.getAllAnnotations?.() || [];
+      // Strip transient fields that don't survive a JSON round-trip
+      // (e.g., element references). Keep the parts a future viewer needs.
+      const serialized = all.map((a) => ({
+        annotationUID: a.annotationUID,
+        metadata: a.metadata,
+        data: {
+          handles: a.data?.handles,
+          label: a.data?.label,
+          cachedStats: a.data?.cachedStats,
+        },
+      }));
+      const { error } = await supabase
+        .from('imaging_studies')
+        .update({
+          viewer_annotations: serialized,
+          viewer_annotations_updated_at: new Date().toISOString(),
+        })
+        .eq('id', studyId);
+      if (error) throw error;
+      console.log('[cbct] saved', serialized.length, 'annotations');
+      // Lightweight UX feedback — flash the button via state we already have
+      setProbeReadout({ savedAt: Date.now(), count: serialized.length });
+      setTimeout(() => setProbeReadout(null), 2000);
+    } catch (e) {
+      console.warn('[cbct] save annotations failed:', e?.message);
+      alert(`Save failed: ${e?.message || e}`);
+    }
+  }, [studyId]);
+
+  // Auto-load saved annotations once the viewer is ready (best-effort).
+  useEffect(() => {
+    if (stage !== 'ready' || !studyId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('imaging_studies')
+          .select('viewer_annotations')
+          .eq('id', studyId)
+          .maybeSingle();
+        if (cancelled) return;
+        const saved = data?.viewer_annotations;
+        if (Array.isArray(saved) && saved.length > 0) {
+          // Re-add each annotation via the cornerstone state API. Each
+          // entry needs a frameOfReferenceUID to attach to a viewport
+          // group — we use the first MPR viewport's FoR.
+          const engine = enginRef.current;
+          const vp = engine?.getViewport(MPR_VIEWPORT_IDS[0]);
+          const FrameOfReferenceUID = vp?.getFrameOfReferenceUID?.();
+          if (!FrameOfReferenceUID) return;
+          for (const a of saved) {
+            try {
+              cornerstoneTools.annotation?.state?.addAnnotation?.(
+                { ...a, metadata: { ...a.metadata, FrameOfReferenceUID } },
+                FrameOfReferenceUID
+              );
+            } catch {}
+          }
+          engine?.render();
+          console.log('[cbct] restored', saved.length, 'saved annotations');
+        }
+      } catch (e) {
+        console.warn('[cbct] load annotations failed:', e?.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [stage, studyId]);
+
   // ── Display toggles ─────────────────────────────────────────────────
   // Invert image — flips greyscale (negative). Useful for highlighting
   // soft tissue against bone or vice versa.
@@ -1374,6 +1489,12 @@ export default function CBCTViewerPage() {
             display = `${text.length.toFixed(2)} × ${text.width.toFixed(2)} mm`;
           } else if (tool === 'Probe' && text?.value != null) {
             display = `${Math.round(text.value)} HU`;
+          } else if (
+            (tool === 'RectangleROI' || tool === 'CircleROI' || tool === 'EllipticalROI')
+            && text?.mean != null
+          ) {
+            // ROI tools report mean / min / max / stdDev / area / count
+            display = `μ ${Math.round(text.mean)} HU · σ ${text.stdDev?.toFixed(0) || 0}`;
           }
           list.push({
             uid: a.annotationUID,
@@ -1447,16 +1568,28 @@ export default function CBCTViewerPage() {
             style={{ backgroundColor: PANEL_BG, borderColor: '#1d2128', width: 200 }}
           >
             {/* Section: Tools */}
-            <SectionHeader>Tools</SectionHeader>
+            <SectionHeader>Measure</SectionHeader>
             <div className="grid grid-cols-5 gap-1 mb-1">
               <ToolButton active={activeTool === 'crosshair'}     onClick={() => selectTool('crosshair')}     icon={CrosshairIcon} label="Crosshair (1)" />
               <ToolButton active={activeTool === 'length'}        onClick={() => selectTool('length')}        icon={Ruler}         label="Length (2)" />
               <ToolButton active={activeTool === 'angle'}         onClick={() => selectTool('angle')}         icon={Triangle}      label="Angle (3)" />
               <ToolButton active={activeTool === 'bidirectional'} onClick={() => selectTool('bidirectional')} icon={Plus}          label="Bidirectional (4)" />
               <ToolButton active={activeTool === 'probe'}         onClick={() => selectTool('probe')}         icon={Activity}      label="HU Probe (5)" />
-              <ToolButton active={activeTool === 'pan'}           onClick={() => selectTool('pan')}           icon={Move}          label="Pan (6)" />
-              <ToolButton active={activeTool === 'zoom'}          onClick={() => selectTool('zoom')}          icon={ZoomIn}        label="Zoom (7)" />
+            </div>
+
+            <SectionHeader>Density ROI</SectionHeader>
+            <div className="grid grid-cols-5 gap-1 mb-1">
+              <ToolButton active={activeTool === 'rectROI'}    onClick={() => selectTool('rectROI')}    icon={Square}     label="Rectangle ROI" />
+              <ToolButton active={activeTool === 'circleROI'}  onClick={() => selectTool('circleROI')}  icon={CircleIcon} label="Circle ROI" />
+              <ToolButton active={activeTool === 'ellipseROI'} onClick={() => selectTool('ellipseROI')} icon={Hexagon}    label="Ellipse ROI" />
+            </div>
+
+            <SectionHeader>Navigate</SectionHeader>
+            <div className="grid grid-cols-5 gap-1 mb-1">
+              <ToolButton active={activeTool === 'pan'}  onClick={() => selectTool('pan')}  icon={Move}   label="Pan (6)" />
+              <ToolButton active={activeTool === 'zoom'} onClick={() => selectTool('zoom')} icon={ZoomIn} label="Zoom (7)" />
               <ToolButton active={false} onClick={handleResetViews}        icon={RotateCcw} label="Reset (R)" />
+              <ToolButton active={false} onClick={handleSaveMeasurements}  icon={Save}      label="Save measurements" />
               <ToolButton active={false} onClick={handleClearMeasurements} icon={Trash2}    label="Clear annotations" danger />
             </div>
 
@@ -1530,6 +1663,17 @@ export default function CBCTViewerPage() {
                   <span className="font-mono text-amber-300">{a.display}</span>
                 </div>
               ))}
+            </div>
+
+            {/* Section: AI (Phase 4 — surfaces architecture, real models later) */}
+            <SectionHeader>AI · Phase 4</SectionHeader>
+            <div className="grid grid-cols-1 gap-1 mb-2">
+              <button
+                onClick={() => setShowAiModal(true)}
+                className="text-[10px] py-1.5 rounded bg-gray-800 hover:bg-purple-700 text-gray-300 hover:text-white flex items-center justify-center gap-1.5"
+              >
+                <Sparkles size={10} /> AI segmentation
+              </button>
             </div>
 
             {/* Section: Help */}
@@ -1653,6 +1797,71 @@ export default function CBCTViewerPage() {
 
         </div>
       </div>
+
+      {/* AI segmentation modal — Phase 4 roadmap stub */}
+      {showAiModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          onClick={() => setShowAiModal(false)}
+        >
+          <div
+            className="rounded-lg p-5 max-w-lg w-full mx-4 text-sm"
+            style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <Sparkles size={18} className="text-purple-400" />
+              <h2 className="text-base font-semibold text-white">AI Segmentation · Phase 4</h2>
+            </div>
+            <p className="text-gray-400 text-xs leading-relaxed mb-3">
+              Server-side AI models for automated dental analysis. The viewer is wired
+              to call these endpoints; the models themselves ship in Phase 4 once we deploy
+              the inference service alongside the converter.
+            </p>
+            <div className="space-y-2 text-xs">
+              <AiFeature label="Tooth segmentation"          status="planned" desc="Per-tooth labels (FDI / Universal numbering)" />
+              <AiFeature label="Mandibular nerve canal"      status="planned" desc="IAN trace with 5mm safety zone overlay" />
+              <AiFeature label="Sinus segmentation"          status="planned" desc="Maxillary sinus boundary for sinus-lift planning" />
+              <AiFeature label="Caries detection"            status="planned" desc="Per-tooth caries flag with confidence score" />
+              <AiFeature label="Periapical lesion detection" status="planned" desc="Auto-flagged radiolucent lesions" />
+              <AiFeature label="Cephalometric landmarks"     status="planned" desc="Auto-place 19 standard landmarks (Sella, Nasion, etc.)" />
+              <AiFeature label="Implant suggestion"          status="planned" desc="AI proposes implant positions with collision warnings" />
+              <AiFeature label="IOS-CBCT registration"       status="planned" desc="Align intraoral scan to CBCT for unified planning" />
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={() => setShowAiModal(false)}
+                className="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Single row in the AI roadmap modal. Status pill colour-codes whether
+ * the feature is planned, training, or live.
+ */
+function AiFeature({ label, status, desc }) {
+  const colors = {
+    planned:  'bg-gray-800 text-gray-400',
+    training: 'bg-amber-900 text-amber-300',
+    live:     'bg-green-900 text-green-300',
+  };
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div>
+        <div className="text-gray-200">{label}</div>
+        <div className="text-gray-500 text-[10px] mt-0.5">{desc}</div>
+      </div>
+      <span className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 ${colors[status]}`}>
+        {status}
+      </span>
     </div>
   );
 }

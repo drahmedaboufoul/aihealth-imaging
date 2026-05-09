@@ -26,7 +26,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams, useNavigate, useLocation } from 'react-router-dom';
 import { Loader2, AlertCircle, ArrowLeft, Box } from 'lucide-react';
-import { resolveStudyDicomFiles } from '../lib/signedUrl';
+import { resolveStudyDicomFiles, resolveStudyNiftiVolume } from '../lib/signedUrl';
+import { loadNiftiVolume } from '../lib/niftiLoader';
 import {
   initCornerstone,
   imageIdFromSignedUrl,
@@ -136,6 +137,214 @@ function rawPresetsForRange(range) {
   ];
 }
 
+/**
+ * NIfTI fast-path renderer. Downloads the .nii.gz, parses it, and
+ * registers it as a local Cornerstone3D volume with explicit geometry
+ * from the header. Bypasses the streaming DICOM loader entirely.
+ *
+ * Sets up the same 4-panel layout (axial/coronal/sagittal/3D) and tool
+ * groups as the DICOM path. The viewer code below this is unchanged so
+ * features added later (measurements, segmentation, AI overlays) work
+ * for both paths uniformly.
+ */
+async function renderFromNifti({
+  niftiUrl,
+  volumeId,
+  elements,
+  setProgress,
+  setPresetTable,
+  cancelledRef,
+  engineRef,
+}) {
+  setProgress(10);
+  const nii = await loadNiftiVolume(niftiUrl);
+  if (cancelledRef()) return;
+  setProgress(60);
+
+  console.log('[cbct] NIfTI loaded', {
+    dimensions: nii.dimensions,
+    spacing: nii.spacing,
+    origin: nii.origin,
+    metadata: nii.metadata,
+    voxelCount: nii.scalarData.length,
+  });
+
+  // Register a local volume so cornerstone treats it like any streamed
+  // volume from this point on. v4 ships volumeLoader.createLocalVolume
+  // which takes the explicit geometry we already have from the NIfTI
+  // header — no auto-detection.
+  const localVolumeOptions = {
+    scalarData: nii.scalarData,
+    metadata: {
+      // Cornerstone reads BitsAllocated / PixelRepresentation to pick the
+      // right typed array on slice access. We've already standardised on
+      // typed arrays so we set sane defaults.
+      BitsAllocated: 16,
+      BitsStored: 16,
+      SamplesPerPixel: 1,
+      HighBit: 15,
+      PhotometricInterpretation: 'MONOCHROME2',
+      PixelRepresentation: 1,
+      Modality: 'CT',
+    },
+    dimensions: nii.dimensions,
+    spacing: nii.spacing,
+    origin: nii.origin,
+    direction: nii.direction,
+  };
+
+  // v4 createLocalVolume API has gone through a couple of name
+  // variations — try the canonical name first, then aliases.
+  let volume = null;
+  const vl = cornerstone.volumeLoader;
+  if (typeof vl.createLocalVolume === 'function') {
+    volume = await vl.createLocalVolume(volumeId, localVolumeOptions);
+  } else if (typeof vl.createAndCacheLocalVolume === 'function') {
+    volume = await vl.createAndCacheLocalVolume(localVolumeOptions, volumeId);
+  } else if (typeof vl.createAndCacheVolumeFromImagesSync === 'function') {
+    // Fallback only if the local-volume helpers are unavailable in this
+    // exact build of cornerstone — should never hit this on v4.22+.
+    throw new Error('cornerstone.volumeLoader.createLocalVolume is unavailable in this build');
+  } else {
+    throw new Error('No usable createLocalVolume on cornerstone.volumeLoader');
+  }
+  if (cancelledRef()) return;
+  setProgress(80);
+
+  // Build rendering engine + viewports
+  let engine = cornerstone.getRenderingEngine(RENDERING_ENGINE_ID);
+  if (!engine) engine = new cornerstone.RenderingEngine(RENDERING_ENGINE_ID);
+  engineRef.current = engine;
+
+  const Enums = cornerstone.Enums;
+  const viewportInputs = VIEWPORTS.map((v) => ({
+    viewportId: v.id,
+    element: elements[v.id],
+    type: v.id === 'CBCT_3D' ? Enums.ViewportType.VOLUME_3D : Enums.ViewportType.ORTHOGRAPHIC,
+    defaultOptions: {
+      orientation: Enums.OrientationAxis[v.orientationKey],
+      background: [0, 0, 0],
+    },
+  }));
+  engine.setViewports(viewportInputs);
+
+  // Compute auto-VOI from the actual scalar data so presets match the
+  // scanner's pixel scale (HU vs raw).
+  const dataRange = readVolumeDataRange(volume);
+  const isHU = dataRange ? (dataRange.min < -200) : true;
+  const presets = isHU ? VOLUME_PRESETS_HU : rawPresetsForRange(dataRange);
+  if (!cancelledRef()) setPresetTable(presets);
+  const defaultPreset = presets.find((p) => p.name === 'Bone') || presets[0];
+
+  await cornerstone.setVolumesForViewports(
+    engine,
+    [{ volumeId }],
+    VIEWPORTS.map((v) => v.id),
+  );
+
+  for (const id of MPR_VIEWPORT_IDS) {
+    const vp = engine.getViewport(id);
+    if (!vp) continue;
+    vp.setProperties({
+      voiRange: {
+        lower: defaultPreset.wc - defaultPreset.ww / 2,
+        upper: defaultPreset.wc + defaultPreset.ww / 2,
+      },
+    });
+  }
+  try {
+    const vp3d = engine.getViewport('CBCT_3D');
+    if (vp3d?.setProperties) {
+      vp3d.setProperties({ preset: isHU ? 'CT-Bone' : 'CT-AAA' });
+    }
+  } catch (e) {
+    console.warn('[cbct] 3D preset apply failed:', e?.message);
+  }
+
+  // Same tool groups + VOI synchronizer as the DICOM path. We extract
+  // this into a helper to avoid duplication.
+  setupCbctToolGroups(engine);
+
+  engine.render();
+  setProgress(100);
+}
+
+/**
+ * Build the MPR + 3D tool groups + VOI synchronizer. Shared between the
+ * NIfTI fast path and the DICOM streaming fallback so both render with
+ * identical interaction.
+ */
+function setupCbctToolGroups(engine) {
+  try { cornerstoneTools.ToolGroupManager.destroyToolGroup(TOOL_GROUP_MPR_ID); } catch {}
+  try { cornerstoneTools.ToolGroupManager.destroyToolGroup(TOOL_GROUP_3D_ID); } catch {}
+  const mprGroup = cornerstoneTools.ToolGroupManager.createToolGroup(TOOL_GROUP_MPR_ID);
+  const vrGroup  = cornerstoneTools.ToolGroupManager.createToolGroup(TOOL_GROUP_3D_ID);
+
+  const mprTools = [
+    cornerstoneTools.WindowLevelTool,
+    cornerstoneTools.PanTool,
+    cornerstoneTools.ZoomTool,
+    cornerstoneTools.StackScrollTool,
+    cornerstoneTools.CrosshairsTool,
+  ];
+  for (const T of mprTools) cornerstoneTools.addTool(T);
+  try { cornerstoneTools.addTool(cornerstoneTools.TrackballRotateTool); } catch {}
+
+  mprGroup.addTool(cornerstoneTools.WindowLevelTool.toolName);
+  mprGroup.addTool(cornerstoneTools.PanTool.toolName);
+  mprGroup.addTool(cornerstoneTools.ZoomTool.toolName);
+  mprGroup.addTool(cornerstoneTools.StackScrollTool.toolName);
+  mprGroup.addTool(cornerstoneTools.CrosshairsTool.toolName, {
+    getReferenceLineColor: (vid) => {
+      const v = VIEWPORTS.find((x) => x.id === vid);
+      return v?.color || '#f59e0b';
+    },
+    getReferenceLineControllable: () => true,
+    getReferenceLineDraggableRotatable: () => true,
+    getReferenceLineSlabThicknessControlsOn: () => false,
+  });
+
+  for (const id of MPR_VIEWPORT_IDS) mprGroup.addViewport(id, RENDERING_ENGINE_ID);
+
+  mprGroup.setToolActive(cornerstoneTools.CrosshairsTool.toolName, {
+    bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
+  });
+  mprGroup.setToolActive(cornerstoneTools.WindowLevelTool.toolName, {
+    bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Secondary }],
+  });
+  mprGroup.setToolActive(cornerstoneTools.PanTool.toolName, {
+    bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Auxiliary }],
+  });
+  mprGroup.setToolActive(cornerstoneTools.StackScrollTool.toolName, {
+    bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Wheel }],
+  });
+
+  vrGroup.addTool(cornerstoneTools.TrackballRotateTool.toolName);
+  vrGroup.addTool(cornerstoneTools.ZoomTool.toolName);
+  vrGroup.addViewport('CBCT_3D', RENDERING_ENGINE_ID);
+  vrGroup.setToolActive(cornerstoneTools.TrackballRotateTool.toolName, {
+    bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
+  });
+  vrGroup.setToolActive(cornerstoneTools.ZoomTool.toolName, {
+    bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Wheel }],
+  });
+
+  // VOI sync across the three MPR viewports.
+  try {
+    try { cornerstoneTools.SynchronizerManager?.destroySynchronizer?.(VOI_SYNC_ID); } catch {}
+    const voiSync = cornerstoneTools.synchronizers?.createVOISynchronizer
+      ? cornerstoneTools.synchronizers.createVOISynchronizer(VOI_SYNC_ID)
+      : null;
+    if (voiSync) {
+      for (const id of MPR_VIEWPORT_IDS) {
+        voiSync.add({ renderingEngineId: RENDERING_ENGINE_ID, viewportId: id });
+      }
+    }
+  } catch (e) {
+    console.warn('[cbct] VOI synchronizer setup failed:', e?.message);
+  }
+}
+
 export default function CBCTViewerPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -172,6 +381,61 @@ export default function CBCTViewerPage() {
         if (cancelled) return;
 
         setStage('resolving');
+
+        // ── Architecture A fast path ──────────────────────────────────
+        // If the EMR converted this study to NIfTI server-side, take the
+        // single-file path. Geometry is baked into the header — no IPP
+        // guesswork, no scanner-quirk landmines. Falls through to the
+        // DICOM streaming path if no NIfTI is available yet.
+        let niftiInfo = { url: null, status: null, error: null };
+        try {
+          niftiInfo = await resolveStudyNiftiVolume(studyId);
+        } catch (e) {
+          console.warn('[cbct] resolveStudyNiftiVolume failed (will fall back to DICOM):', e?.message);
+        }
+        if (cancelled) return;
+
+        if (niftiInfo.status === 'converting' || niftiInfo.status === 'queued') {
+          throw new Error(
+            'This volume is still being processed by the conversion service. ' +
+            'Refresh in a minute, or fall back to the 2D DICOM viewer below.'
+          );
+        }
+
+        if (niftiInfo.url) {
+          // NIfTI ready — load + render and we're done. The browser
+          // sees one file with explicit geometry and avoids the entire
+          // DICOM-stack reconstruction path.
+          setStage('loading-volume');
+          await initCornerstone();
+          if (cancelled) return;
+
+          const volumeId = `cornerstoneVolume:nifti-${studyId}`;
+          await renderFromNifti({
+            niftiUrl: niftiInfo.url,
+            volumeId,
+            elements: {
+              CBCT_AXIAL:    axialRef.current,
+              CBCT_CORONAL:  coronalRef.current,
+              CBCT_SAGITTAL: sagittalRef.current,
+              CBCT_3D:       vrRef.current,
+            },
+            setProgress,
+            setPresetTable,
+            cancelledRef: () => cancelled,
+            engineRef: enginRef,
+          });
+          if (cancelled) return;
+          setStage('ready');
+          return;
+        }
+
+        // ── Fallback: DICOM streaming path ────────────────────────────
+        // Used when the converter hasn't run yet (status null) or failed.
+        if (niftiInfo.status === 'failed') {
+          console.warn('[cbct] NIfTI conversion failed for this study, falling back to DICOM:', niftiInfo.error);
+        }
+
         const list = await resolveStudyDicomFiles(studyId);
         if (cancelled) return;
         if (list.length < 3) {

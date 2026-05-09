@@ -12,6 +12,7 @@ import { supabase } from './supabase';
 
 const DEFAULT_BUCKET = 'patient-files';
 const IMAGING_BUCKET = 'imaging';
+const NIFTI_BUCKET = 'imaging-derived';
 const SCAN_KINDS = ['stl', 'ply', 'obj'];
 
 export async function resolveSignedUrl({ id, path }) {
@@ -146,4 +147,48 @@ export async function resolveStudyDicomFiles(studyId) {
   const ok = signed.filter(Boolean);
   if (ok.length === 0) throw new Error(`Could not sign any DICOM files for study ${studyId}`);
   return ok;
+}
+
+/**
+ * Look up the server-converted NIfTI volume for a study, if one exists.
+ * The conversion service writes nifti_storage_path to imaging_studies
+ * once it succeeds; until then this returns null and the viewer falls
+ * back to streaming the DICOM stack.
+ *
+ * Returns null if:
+ *   - The study has not been converted yet (nifti_status null/queued/converting)
+ *   - The conversion failed (nifti_status='failed') — caller can read
+ *     nifti_status separately to render an error state
+ *   - No row found (caller error — should be checked upstream)
+ *
+ * Returns { url, status, dimensions, spacing, error } when conversion is ready.
+ */
+export async function resolveStudyNiftiVolume(studyId) {
+  if (!studyId) throw new Error('studyId is required');
+
+  const { data: row, error } = await supabase
+    .from('imaging_studies')
+    .select('id, nifti_storage_path, nifti_status, nifti_error')
+    .eq('id', studyId)
+    .maybeSingle();
+
+  if (error) throw new Error(`imaging_studies lookup failed: ${error.message}`);
+  if (!row) return { url: null, status: null, error: 'study not found' };
+
+  // Status surface so the viewer can render different UI for queued vs
+  // converting vs failed without making another query.
+  const status = row.nifti_status || null;
+  if (!row.nifti_storage_path || status !== 'ready') {
+    return { url: null, status, error: row.nifti_error || null };
+  }
+
+  const { data: signed, error: sErr } = await supabase
+    .storage
+    .from(NIFTI_BUCKET)
+    .createSignedUrl(row.nifti_storage_path, 60 * 60);
+  if (sErr) {
+    return { url: null, status, error: `sign failed: ${sErr.message}` };
+  }
+
+  return { url: signed.signedUrl, status: 'ready', error: null };
 }

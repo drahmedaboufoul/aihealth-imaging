@@ -220,8 +220,19 @@ export default function CBCTViewerPage() {
       } catch (err) {
         if (cancelled) return;
         console.error('[CBCT viewer] init failed:', err);
-        setError(err?.message || String(err));
-        setStage('error');
+        // The streaming-image-volume-loader has a known race with
+        // JPEG-2000 encapsulated pixel data in cornerstone 1.77 — the
+        // per-slice metadata re-parse hits "ByteStream position" errors
+        // and the volume never finishes assembling. Until B.3.4
+        // (dicom-image-loader 2.x upgrade), fall back to the 2D stack
+        // viewer so the case is at least viewable.
+        const fallbackUrl = `/viewer/dicom?study=${studyId}`;
+        navigate(fallbackUrl, {
+          replace: true,
+          state: {
+            cbctFallbackReason: err?.message || String(err),
+          },
+        });
       }
     })();
 

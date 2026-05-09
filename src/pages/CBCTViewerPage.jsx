@@ -30,6 +30,7 @@ import {
   Move, ZoomIn, RotateCcw,
   Ruler, Triangle, Crosshair as CrosshairIcon,
   Activity, Trash2, Plus,
+  Eye, EyeOff, Contrast, Layers, ChevronRight,
 } from 'lucide-react';
 import { resolveStudyDicomFiles, resolveStudyNiftiVolume } from '../lib/signedUrl';
 import { loadNiftiVolume } from '../lib/niftiLoader';
@@ -75,6 +76,63 @@ const VIEWPORTS = [
 // which viewports are MPR (so it doesn't try to draw crosshairs on the 3D
 // panel).
 const MPR_VIEWPORT_IDS = ['CBCT_AXIAL', 'CBCT_CORONAL', 'CBCT_SAGITTAL'];
+
+/**
+ * View modes — each maps to a different layout + viewport configuration
+ * over the SAME underlying volume. Switching modes doesn't reload the
+ * volume; it rebuilds viewports + tool group bindings.
+ *
+ * Today: MPR + 3D and Ceph are wired. Pano / Cross-sections / Implant /
+ * TMJ are placeholders for Phase 2/3 with explanatory tooltips so the
+ * roadmap is visible from the UI.
+ */
+const VIEW_MODES = {
+  'mpr-3d': {
+    name: 'MPR + 3D',
+    ready: true,
+    layout: 'grid-2x2',
+    viewports: [
+      { id: 'CBCT_AXIAL',    label: 'Axial',    orientationKey: 'AXIAL',    color: '#10b981', kind: 'orthographic' },
+      { id: 'CBCT_CORONAL',  label: 'Coronal',  orientationKey: 'CORONAL',  color: '#3b82f6', kind: 'orthographic' },
+      { id: 'CBCT_SAGITTAL', label: 'Sagittal', orientationKey: 'SAGITTAL', color: '#f59e0b', kind: 'orthographic' },
+      { id: 'CBCT_3D',       label: '3D',       orientationKey: 'CORONAL',  color: '#ef4444', kind: 'volume_3d' },
+    ],
+  },
+  'ceph': {
+    name: 'Ceph',
+    ready: true,
+    layout: 'side-by-side',
+    description: 'Synthetic cephalometric: thick-slab MIP through the full skull. Lateral (left) + PA (right).',
+    viewports: [
+      { id: 'CEPH_LAT', label: 'Lateral',     orientationKey: 'SAGITTAL', color: '#10b981', kind: 'orthographic', slabMM: 200, blendMode: 'MIP' },
+      { id: 'CEPH_PA',  label: 'Postero-Ant', orientationKey: 'CORONAL',  color: '#3b82f6', kind: 'orthographic', slabMM: 200, blendMode: 'MIP' },
+    ],
+  },
+  'pano': {
+    name: 'Pano',
+    ready: false,
+    description: 'Reformatted panoramic — requires arch-curve tracing on axial. Phase 2.',
+    viewports: [],
+  },
+  'crosssec': {
+    name: 'Cross-sections',
+    ready: false,
+    description: 'Perpendicular cross-sections along the arch curve. Phase 2.',
+    viewports: [],
+  },
+  'implant': {
+    name: 'Implant',
+    ready: false,
+    description: 'Virtual implant placement with safety zones. Phase 3.',
+    viewports: [],
+  },
+  'tmj': {
+    name: 'TMJ',
+    ready: false,
+    description: 'Bilateral TMJ axials + corrected sagittals. Phase 3.',
+    viewports: [],
+  },
+};
 
 /**
  * Read the volume's actual scalar data range. Used to detect HU vs raw
@@ -160,6 +218,8 @@ async function renderFromNifti({
   setPresetTable,
   cancelledRef,
   engineRef,
+  cachedVolumeRef,
+  cachedVolumeIdRef,
 }) {
   setProgress(10);
   const nii = await loadNiftiVolume(niftiUrl);
@@ -214,6 +274,9 @@ async function renderFromNifti({
     throw new Error('No usable createLocalVolume on cornerstone.volumeLoader');
   }
   if (cancelledRef()) return;
+  // Cache for view-mode rebuilds (don't reload the volume on switch)
+  if (cachedVolumeRef) cachedVolumeRef.current = volume;
+  if (cachedVolumeIdRef) cachedVolumeIdRef.current = volumeId;
   setProgress(80);
 
   // Build rendering engine + viewports
@@ -390,6 +453,97 @@ function setupCbctToolGroups(engine) {
 }
 
 /**
+ * Mode-aware tool group setup. Used when the user switches view modes
+ * (e.g. MPR + 3D → Ceph) so the new viewport IDs get the same set of
+ * tools wired up. Falls back to the default MPR_VIEWPORT_IDS when the
+ * mode config is missing.
+ */
+function setupCbctToolGroupsForMode(engine, modeCfg) {
+  initPrimaryToolMap();
+  try { cornerstoneTools.ToolGroupManager.destroyToolGroup(TOOL_GROUP_MPR_ID); } catch {}
+  try { cornerstoneTools.ToolGroupManager.destroyToolGroup(TOOL_GROUP_3D_ID); } catch {}
+  const mprGroup = cornerstoneTools.ToolGroupManager.createToolGroup(TOOL_GROUP_MPR_ID);
+  const vrGroup  = cornerstoneTools.ToolGroupManager.createToolGroup(TOOL_GROUP_3D_ID);
+
+  const mprTools = [
+    cornerstoneTools.WindowLevelTool, cornerstoneTools.PanTool, cornerstoneTools.ZoomTool,
+    cornerstoneTools.StackScrollTool, cornerstoneTools.CrosshairsTool,
+    cornerstoneTools.LengthTool, cornerstoneTools.AngleTool,
+    cornerstoneTools.BidirectionalTool, cornerstoneTools.ProbeTool,
+  ];
+  for (const T of mprTools) cornerstoneTools.addTool(T);
+  try { cornerstoneTools.addTool(cornerstoneTools.TrackballRotateTool); } catch {}
+
+  mprGroup.addTool(cornerstoneTools.WindowLevelTool.toolName);
+  mprGroup.addTool(cornerstoneTools.PanTool.toolName);
+  mprGroup.addTool(cornerstoneTools.ZoomTool.toolName);
+  mprGroup.addTool(cornerstoneTools.StackScrollTool.toolName);
+  mprGroup.addTool(cornerstoneTools.CrosshairsTool.toolName, {
+    getReferenceLineColor: (vid) => {
+      const v = (modeCfg?.viewports || []).find((x) => x.id === vid);
+      return v?.color || '#f59e0b';
+    },
+    getReferenceLineControllable: () => true,
+    getReferenceLineDraggableRotatable: () => true,
+    getReferenceLineSlabThicknessControlsOn: () => false,
+  });
+  mprGroup.addTool(cornerstoneTools.LengthTool.toolName);
+  mprGroup.addTool(cornerstoneTools.AngleTool.toolName);
+  mprGroup.addTool(cornerstoneTools.BidirectionalTool.toolName);
+  mprGroup.addTool(cornerstoneTools.ProbeTool.toolName);
+
+  // Add every orthographic viewport from this mode's config to the MPR
+  // group, every volume_3d viewport to the 3D group.
+  const orthoIds = (modeCfg?.viewports || []).filter((v) => v.kind === 'orthographic').map((v) => v.id);
+  const vrIds    = (modeCfg?.viewports || []).filter((v) => v.kind === 'volume_3d').map((v) => v.id);
+  for (const id of orthoIds) mprGroup.addViewport(id, RENDERING_ENGINE_ID);
+  for (const id of vrIds)    vrGroup.addViewport(id, RENDERING_ENGINE_ID);
+
+  // Default bindings — Crosshair on Primary (only meaningful with >=2
+  // ortho viewports, but harmless on a single panel), W/L on Secondary.
+  if (orthoIds.length >= 2) {
+    mprGroup.setToolActive(cornerstoneTools.CrosshairsTool.toolName, {
+      bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
+    });
+  }
+  mprGroup.setToolActive(cornerstoneTools.WindowLevelTool.toolName, {
+    bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Secondary }],
+  });
+  mprGroup.setToolActive(cornerstoneTools.PanTool.toolName, {
+    bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Auxiliary }],
+  });
+  mprGroup.setToolActive(cornerstoneTools.StackScrollTool.toolName, {
+    bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Wheel }],
+  });
+
+  if (vrIds.length > 0) {
+    vrGroup.addTool(cornerstoneTools.TrackballRotateTool.toolName);
+    vrGroup.addTool(cornerstoneTools.ZoomTool.toolName);
+    vrGroup.setToolActive(cornerstoneTools.TrackballRotateTool.toolName, {
+      bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
+    });
+    vrGroup.setToolActive(cornerstoneTools.ZoomTool.toolName, {
+      bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Wheel }],
+    });
+  }
+
+  // VOI sync across orthographic viewports.
+  try {
+    try { cornerstoneTools.SynchronizerManager?.destroySynchronizer?.(VOI_SYNC_ID); } catch {}
+    const voiSync = cornerstoneTools.synchronizers?.createVOISynchronizer
+      ? cornerstoneTools.synchronizers.createVOISynchronizer(VOI_SYNC_ID)
+      : null;
+    if (voiSync) {
+      for (const id of orthoIds) {
+        voiSync.add({ renderingEngineId: RENDERING_ENGINE_ID, viewportId: id });
+      }
+    }
+  } catch (e) {
+    console.warn('[cbct] VOI synchronizer setup failed:', e?.message);
+  }
+}
+
+/**
  * Swap which tool is active on the Primary mouse button. Used by the
  * toolbar to move between Crosshair / Length / Angle / etc. without
  * disturbing the secondary / wheel bindings.
@@ -463,6 +617,23 @@ export default function CBCTViewerPage() {
   // HU readout from the Probe tool: { value, x, y, z } in patient mm + voxel value
   const [probeReadout, setProbeReadout] = useState(null);
 
+  // View mode — 'mpr-3d' (default), 'ceph', 'pano' (placeholder), etc.
+  const [viewMode, setViewMode] = useState('mpr-3d');
+
+  // Display toggles
+  const [invert, setInvert]               = useState(false);
+  const [showRefLines, setShowRefLines]   = useState(true);
+  const [slabThickness, setSlabThickness] = useState(0); // in mm; 0 = single slice
+
+  // Annotation list (refreshed periodically while the user is drawing).
+  // Each entry: { uid, toolName, displayText, viewportId }
+  const [annotations, setAnnotations] = useState([]);
+
+  // Cached volume + last loaded volumeId, for fast view-mode rebuilds
+  // without reloading the volume.
+  const cachedVolumeRef = useRef(null);
+  const cachedVolumeIdRef = useRef(null);
+
   const axialRef    = useRef(null);
   const coronalRef  = useRef(null);
   const sagittalRef = useRef(null);
@@ -530,6 +701,8 @@ export default function CBCTViewerPage() {
             setPresetTable,
             cancelledRef: () => cancelled,
             engineRef: enginRef,
+            cachedVolumeRef,
+            cachedVolumeIdRef,
           });
           if (cancelled) return;
           setStage('ready');
@@ -1018,7 +1191,215 @@ export default function CBCTViewerPage() {
   };
   const handleClearMeasurements = () => {
     clearAllAnnotations();
+    setAnnotations([]);
   };
+
+  // ── Display toggles ─────────────────────────────────────────────────
+  // Invert image — flips greyscale (negative). Useful for highlighting
+  // soft tissue against bone or vice versa.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    const engine = enginRef.current;
+    if (!engine) return;
+    for (const v of (VIEW_MODES[viewMode]?.viewports || [])) {
+      try {
+        const vp = engine.getViewport(v.id);
+        if (vp?.setProperties && v.kind === 'orthographic') {
+          vp.setProperties({ invert });
+        }
+      } catch {}
+    }
+    engine.render();
+  }, [invert, stage, viewMode]);
+
+  // Show/hide crosshair reference lines. Cornerstone's CrosshairsTool has
+  // a per-tool config — toggling means re-adding with a different
+  // getReferenceLineVisibility callback. Simpler: setToolConfig at runtime.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    try {
+      const grp = cornerstoneTools.ToolGroupManager.getToolGroup(TOOL_GROUP_MPR_ID);
+      if (!grp) return;
+      grp.setToolConfiguration?.(
+        cornerstoneTools.CrosshairsTool.toolName,
+        { mobile: { enabled: false }, viewportIndicators: showRefLines }
+      );
+      // Also force a re-render so reference lines redraw
+      enginRef.current?.render();
+    } catch (e) {
+      console.warn('[cbct] toggling reference lines failed:', e?.message);
+    }
+  }, [showRefLines, stage]);
+
+  // Slab thickness slider — sets slab thickness on each MPR viewport so
+  // the user sees a thick-slab MIP instead of a single-slice rendering.
+  // Range: 0..30 mm.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    const engine = enginRef.current;
+    if (!engine) return;
+    const Enums = cornerstone.Enums;
+    for (const v of (VIEW_MODES[viewMode]?.viewports || [])) {
+      try {
+        const vp = engine.getViewport(v.id);
+        if (!vp || v.kind !== 'orthographic') continue;
+        // For Ceph mode, viewports specify their own slab (200mm MIP).
+        // We don't override that here — slabThickness slider only affects
+        // panels that didn't request a fixed slab in their config.
+        if (typeof v.slabMM === 'number') continue;
+        if (slabThickness <= 0) {
+          vp.setSlabThickness?.(0);
+          vp.setBlendMode?.(Enums.BlendModes.COMPOSITE);
+        } else {
+          vp.setSlabThickness?.(slabThickness);
+          vp.setBlendMode?.(Enums.BlendModes.MAXIMUM_INTENSITY_BLEND);
+        }
+      } catch (e) {
+        console.warn('[cbct] slab thickness failed for', v.id, e?.message);
+      }
+    }
+    engine.render();
+  }, [slabThickness, stage, viewMode]);
+
+  // ── View mode switching ────────────────────────────────────────────
+  // When user clicks a tab in the top bar, rebuild the engine's
+  // viewport set (using the cached volume — no reload). For modes
+  // marked ready=false this just shows an overlay and does nothing.
+  const switchViewMode = useCallback(async (modeKey) => {
+    const cfg = VIEW_MODES[modeKey];
+    if (!cfg) return;
+    if (!cfg.ready) {
+      setViewMode(modeKey);
+      return;
+    }
+    const engine = enginRef.current;
+    const volume = cachedVolumeRef.current;
+    const volumeId = cachedVolumeIdRef.current;
+    if (!engine || !volume || !volumeId) return;
+    setViewMode(modeKey);
+    // Build new viewport inputs.
+    const Enums = cornerstone.Enums;
+    const elements = {
+      CBCT_AXIAL: axialRef.current,
+      CBCT_CORONAL: coronalRef.current,
+      CBCT_SAGITTAL: sagittalRef.current,
+      CBCT_3D: vrRef.current,
+    };
+    // Clear out old viewports' tool group bindings; we'll re-add the
+    // new viewport IDs after engine.setViewports().
+    try { cornerstoneTools.ToolGroupManager.destroyToolGroup(TOOL_GROUP_MPR_ID); } catch {}
+    try { cornerstoneTools.ToolGroupManager.destroyToolGroup(TOOL_GROUP_3D_ID); } catch {}
+
+    const inputs = cfg.viewports.map((v) => {
+      // Reuse one of the existing 4 DOM elements depending on layout
+      // slot index. For modes with <4 panels, the unused refs just sit
+      // empty — that's fine.
+      const slotElement =
+        elements[v.id] ||
+        (cfg.layout === 'side-by-side'
+          ? (cfg.viewports.indexOf(v) === 0 ? axialRef.current : coronalRef.current)
+          : axialRef.current);
+      return {
+        viewportId: v.id,
+        element: slotElement,
+        type: v.kind === 'volume_3d' ? Enums.ViewportType.VOLUME_3D : Enums.ViewportType.ORTHOGRAPHIC,
+        defaultOptions: {
+          orientation: Enums.OrientationAxis[v.orientationKey],
+          background: [0, 0, 0],
+        },
+      };
+    });
+    engine.setViewports(inputs);
+
+    await cornerstone.setVolumesForViewports(
+      engine,
+      [{ volumeId }],
+      cfg.viewports.map((v) => v.id),
+    );
+
+    // Apply slab + blend mode + invert per-viewport
+    for (const v of cfg.viewports) {
+      const vp = engine.getViewport(v.id);
+      if (!vp) continue;
+      if (v.slabMM && v.kind === 'orthographic') {
+        vp.setSlabThickness?.(v.slabMM);
+        vp.setBlendMode?.(Enums.BlendModes.MAXIMUM_INTENSITY_BLEND);
+      }
+      if (v.kind === 'orthographic') vp.setProperties({ invert });
+    }
+
+    // Rebuild tool groups for the NEW viewport IDs
+    setupCbctToolGroupsForMode(engine, cfg);
+    engine.render();
+  }, [invert]);
+
+  // ── Keyboard shortcuts ─────────────────────────────────────────────
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    const onKey = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      const map = {
+        '1': 'crosshair', '2': 'length', '3': 'angle',
+        '4': 'bidirectional', '5': 'probe', '6': 'pan', '7': 'zoom',
+      };
+      if (map[e.key]) { selectTool(map[e.key]); e.preventDefault(); return; }
+      if (e.key.toLowerCase() === 'r') { handleResetViews(); e.preventDefault(); return; }
+      if (e.key.toLowerCase() === 'i') { setInvert((v) => !v); e.preventDefault(); return; }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [stage]);
+
+  // ── Annotation list refresh ────────────────────────────────────────
+  // Cornerstone fires ANNOTATION_MODIFIED / ANNOTATION_COMPLETED /
+  // ANNOTATION_REMOVED on the eventTarget. We listen and refresh our
+  // displayed list with each event.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    const refresh = () => {
+      try {
+        const all = cornerstoneTools.annotation?.state?.getAllAnnotations?.() || [];
+        const list = [];
+        for (const a of all) {
+          const tool = a.metadata?.toolName || '?';
+          const text = a.data?.cachedStats
+            ? Object.values(a.data.cachedStats)[0]
+            : null;
+          let display = '';
+          if (tool === 'Length' && text?.length != null) {
+            display = `${text.length.toFixed(2)} mm`;
+          } else if (tool === 'Angle' && text?.angle != null) {
+            display = `${text.angle.toFixed(1)}°`;
+          } else if (tool === 'Bidirectional' && text?.length != null && text?.width != null) {
+            display = `${text.length.toFixed(2)} × ${text.width.toFixed(2)} mm`;
+          } else if (tool === 'Probe' && text?.value != null) {
+            display = `${Math.round(text.value)} HU`;
+          }
+          list.push({
+            uid: a.annotationUID,
+            toolName: tool,
+            display,
+            viewportId: a.metadata?.viewportId,
+          });
+        }
+        setAnnotations(list);
+      } catch (e) {
+        // ignore — annotations API may not be loaded in older cornerstone builds
+      }
+    };
+    const events = [
+      cornerstoneTools.Enums?.Events?.ANNOTATION_COMPLETED,
+      cornerstoneTools.Enums?.Events?.ANNOTATION_MODIFIED,
+      cornerstoneTools.Enums?.Events?.ANNOTATION_REMOVED,
+    ].filter(Boolean);
+    for (const ev of events) cornerstone.eventTarget.addEventListener(ev, refresh);
+    refresh();
+    return () => {
+      for (const ev of events) {
+        try { cornerstone.eventTarget.removeEventListener(ev, refresh); } catch {}
+      }
+    };
+  }, [stage]);
 
   return (
     <div className="h-screen w-screen flex flex-col" style={{ backgroundColor: SHELL_BG, color: '#cdd2d8' }}>
@@ -1037,17 +1418,21 @@ export default function CBCTViewerPage() {
           </div>
         </div>
 
-        {/* View-mode tabs — only MPR + 3D is wired today; the rest are
-            scaffolds for Phase 2/3 (reformatted pano, ceph, implant
-            planning, TMJ). Showing them now signals the roadmap and gives
-            us a place to drop functionality as it ships. */}
+        {/* View-mode tabs — MPR + 3D and Ceph are wired today; the rest
+            are scaffolds for Phase 2/3 with tooltips that explain when
+            they ship. Clicking a wired tab rebuilds viewports over the
+            same cached volume — no reload. */}
         <div className="flex items-center gap-1 text-[11px]">
-          <ViewModeTab active label="MPR + 3D" />
-          <ViewModeTab label="Pano" tooltip="Reformatted panoramic — Phase 2" />
-          <ViewModeTab label="Cross-sections" tooltip="Arch-curve cross-sections — Phase 2" />
-          <ViewModeTab label="Ceph" tooltip="Cephalometric analysis — Phase 3" />
-          <ViewModeTab label="Implant" tooltip="Implant planning — Phase 3" />
-          <ViewModeTab label="TMJ" tooltip="TMJ bilateral — Phase 3" />
+          {Object.entries(VIEW_MODES).map(([key, cfg]) => (
+            <ViewModeTab
+              key={key}
+              active={viewMode === key}
+              ready={cfg.ready}
+              label={cfg.name}
+              tooltip={cfg.description}
+              onClick={() => switchViewMode(key)}
+            />
+          ))}
         </div>
 
         <div className="text-[11px] text-gray-500">Cornerstone3D v4</div>
@@ -1055,23 +1440,106 @@ export default function CBCTViewerPage() {
 
       {/* Body: left toolbox | 4-panel grid | right info rail */}
       <div className="flex-1 flex relative">
-        {/* LEFT — toolbox (vertical icon strip) */}
+        {/* LEFT — full control panel (tools + display + presets + measurements) */}
         {stage === 'ready' && (
           <div
-            className="flex flex-col items-center gap-1 py-2 px-1.5 border-r"
-            style={{ backgroundColor: PANEL_BG, borderColor: '#1d2128', width: 44 }}
+            className="flex flex-col py-2 px-2 border-r overflow-y-auto"
+            style={{ backgroundColor: PANEL_BG, borderColor: '#1d2128', width: 200 }}
           >
-            <ToolButton  active={activeTool === 'crosshair'}     onClick={() => selectTool('crosshair')}     icon={CrosshairIcon} label="Crosshair (drag to re-slice)" />
-            <ToolButton  active={activeTool === 'length'}        onClick={() => selectTool('length')}        icon={Ruler}         label="Length — distance" />
-            <ToolButton  active={activeTool === 'angle'}         onClick={() => selectTool('angle')}         icon={Triangle}      label="Angle — 3-point" />
-            <ToolButton  active={activeTool === 'bidirectional'} onClick={() => selectTool('bidirectional')} icon={Plus}          label="Bidirectional — perpendicular max" />
-            <ToolButton  active={activeTool === 'probe'}         onClick={() => selectTool('probe')}         icon={Activity}      label="HU Probe — Hounsfield unit" />
-            <div className="h-px w-6 bg-gray-800 my-1" />
-            <ToolButton  active={activeTool === 'pan'}           onClick={() => selectTool('pan')}           icon={Move}          label="Pan" />
-            <ToolButton  active={activeTool === 'zoom'}          onClick={() => selectTool('zoom')}          icon={ZoomIn}        label="Zoom" />
-            <div className="h-px w-6 bg-gray-800 my-1" />
-            <ToolButton  active={false} onClick={handleResetViews}        icon={RotateCcw} label="Reset all views" />
-            <ToolButton  active={false} onClick={handleClearMeasurements} icon={Trash2}    label="Clear measurements" danger />
+            {/* Section: Tools */}
+            <SectionHeader>Tools</SectionHeader>
+            <div className="grid grid-cols-5 gap-1 mb-1">
+              <ToolButton active={activeTool === 'crosshair'}     onClick={() => selectTool('crosshair')}     icon={CrosshairIcon} label="Crosshair (1)" />
+              <ToolButton active={activeTool === 'length'}        onClick={() => selectTool('length')}        icon={Ruler}         label="Length (2)" />
+              <ToolButton active={activeTool === 'angle'}         onClick={() => selectTool('angle')}         icon={Triangle}      label="Angle (3)" />
+              <ToolButton active={activeTool === 'bidirectional'} onClick={() => selectTool('bidirectional')} icon={Plus}          label="Bidirectional (4)" />
+              <ToolButton active={activeTool === 'probe'}         onClick={() => selectTool('probe')}         icon={Activity}      label="HU Probe (5)" />
+              <ToolButton active={activeTool === 'pan'}           onClick={() => selectTool('pan')}           icon={Move}          label="Pan (6)" />
+              <ToolButton active={activeTool === 'zoom'}          onClick={() => selectTool('zoom')}          icon={ZoomIn}        label="Zoom (7)" />
+              <ToolButton active={false} onClick={handleResetViews}        icon={RotateCcw} label="Reset (R)" />
+              <ToolButton active={false} onClick={handleClearMeasurements} icon={Trash2}    label="Clear annotations" danger />
+            </div>
+
+            {/* Section: Display toggles */}
+            <SectionHeader>Display</SectionHeader>
+            <div className="grid grid-cols-2 gap-1 mb-2">
+              <button
+                onClick={() => setInvert((v) => !v)}
+                title="Invert greyscale (I)"
+                className={`text-[10px] py-1.5 rounded flex items-center justify-center gap-1 ${
+                  invert ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+              >
+                <Contrast size={10} /> Invert
+              </button>
+              <button
+                onClick={() => setShowRefLines((v) => !v)}
+                title="Reference lines"
+                className={`text-[10px] py-1.5 rounded flex items-center justify-center gap-1 ${
+                  showRefLines ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+              >
+                {showRefLines ? <Eye size={10} /> : <EyeOff size={10} />}
+                Ref lines
+              </button>
+            </div>
+            <div className="mb-2">
+              <div className="flex items-center justify-between text-[10px] text-gray-400 mb-0.5">
+                <span className="flex items-center gap-1"><Layers size={10} /> Slab MIP</span>
+                <span className="font-mono">{slabThickness} mm</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={30}
+                step={1}
+                value={slabThickness}
+                onChange={(e) => setSlabThickness(Number(e.target.value))}
+                className="w-full accent-amber-600"
+              />
+            </div>
+
+            {/* Section: W/L presets */}
+            <SectionHeader>MPR Window</SectionHeader>
+            <div className="grid grid-cols-2 gap-1 mb-2">
+              {presetTable.map((p) => (
+                <button
+                  key={p.name}
+                  onClick={() => applyPreset(p)}
+                  className={`text-[11px] py-1.5 rounded ${activePreset === p.name ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700'}`}
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+
+            {/* Section: Measurements list */}
+            <SectionHeader>
+              Measurements <span className="text-gray-500">({annotations.length})</span>
+            </SectionHeader>
+            <div className="text-[10px] space-y-0.5 mb-2 max-h-48 overflow-y-auto">
+              {annotations.length === 0 && (
+                <div className="text-gray-600 italic">No measurements yet.</div>
+              )}
+              {annotations.map((a) => (
+                <div
+                  key={a.uid}
+                  className="flex items-center justify-between bg-gray-900 rounded px-1.5 py-1"
+                >
+                  <span className="text-gray-400">{a.toolName}</span>
+                  <span className="font-mono text-amber-300">{a.display}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Section: Help */}
+            <SectionHeader>Shortcuts</SectionHeader>
+            <p className="text-[10px] text-gray-500 leading-snug">
+              <span className="text-gray-300">1-5</span> tools · <span className="text-gray-300">6/7</span> pan/zoom<br />
+              <span className="text-gray-300">R</span> reset · <span className="text-gray-300">I</span> invert<br />
+              <span className="text-gray-300">Right-drag</span> = W/L<br />
+              <span className="text-gray-300">Wheel</span> = scroll slices
+            </p>
           </div>
         )}
 
@@ -1106,29 +1574,67 @@ export default function CBCTViewerPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-2 grid-rows-2 gap-px h-full" style={{ backgroundColor: '#1d2128' }}>
-          {VIEWPORTS.map((v, idx) => {
-            const ref = idx === 0 ? axialRef : idx === 1 ? coronalRef : idx === 2 ? sagittalRef : vrRef;
-            const hud = sliceHud[v.id];
+        {/* Placeholder for unbuilt view modes */}
+        {stage === 'ready' && !VIEW_MODES[viewMode]?.ready && (
+          <div className="absolute inset-0 flex items-center justify-center z-20 bg-black/85">
+            <div className="max-w-md text-center px-8">
+              <div className="text-amber-500 text-xs uppercase tracking-wider mb-2">Coming next</div>
+              <h2 className="text-lg font-semibold text-white mb-2">{VIEW_MODES[viewMode]?.name}</h2>
+              <p className="text-sm text-gray-400 leading-relaxed">{VIEW_MODES[viewMode]?.description}</p>
+              <button
+                onClick={() => switchViewMode('mpr-3d')}
+                className="mt-4 text-xs px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white"
+              >
+                Back to MPR + 3D
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div
+          className={
+            VIEW_MODES[viewMode]?.layout === 'side-by-side'
+              ? 'grid grid-cols-2 gap-px h-full'
+              : 'grid grid-cols-2 grid-rows-2 gap-px h-full'
+          }
+          style={{ backgroundColor: '#1d2128' }}
+        >
+          {/* Render up to 4 cells. Each cell is bound to one of the 4
+              persistent refs (axial / coronal / sagittal / vr). The
+              CURRENT view mode's viewports[i] defines the label / color
+              for cell i. Cells beyond viewports.length are hidden so
+              modes with <4 panels (Ceph) get a clean side-by-side. */}
+          {[axialRef, coronalRef, sagittalRef, vrRef].map((ref, idx) => {
+            const cfg = VIEW_MODES[viewMode]?.viewports?.[idx];
+            const hidden = !cfg && VIEW_MODES[viewMode]?.ready;
+            const v = cfg || VIEWPORTS[idx];
+            const hud = cfg ? sliceHud[cfg.id] : null;
             return (
-              <div key={v.id} className="relative" style={{ backgroundColor: SHELL_BG }}>
+              <div
+                key={idx}
+                className="relative"
+                style={{
+                  backgroundColor: SHELL_BG,
+                  display: hidden ? 'none' : undefined,
+                }}
+              >
                 <div
                   ref={ref}
                   className="w-full h-full"
                   onContextMenu={(e) => e.preventDefault()}
                 />
-                {/* Plane label — top-left */}
-                <div
-                  className="absolute top-2 left-2 text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded pointer-events-none"
-                  style={{
-                    backgroundColor: 'rgba(11,13,16,0.6)',
-                    color: v.color,
-                    borderLeft: `2px solid ${v.color}`,
-                  }}
-                >
-                  {v.label}
-                </div>
-                {/* Slice number HUD — top-right (MPR only) */}
+                {cfg && (
+                  <div
+                    className="absolute top-2 left-2 text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded pointer-events-none"
+                    style={{
+                      backgroundColor: 'rgba(11,13,16,0.6)',
+                      color: v.color,
+                      borderLeft: `2px solid ${v.color}`,
+                    }}
+                  >
+                    {v.label}
+                  </div>
+                )}
                 {hud && (
                   <div
                     className="absolute top-2 right-2 text-[10px] font-mono px-1.5 py-0.5 rounded pointer-events-none"
@@ -1145,32 +1651,6 @@ export default function CBCTViewerPage() {
           })}
         </div>
 
-        {/* Floating right rail — W/L presets + active tool hint */}
-        {stage === 'ready' && (
-          <div
-            className="absolute right-3 top-3 w-44 rounded-lg p-2.5 z-10 text-xs space-y-2"
-            style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128' }}
-          >
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">MPR Window</div>
-              <div className="grid grid-cols-2 gap-1">
-                {presetTable.map((p) => (
-                  <button
-                    key={p.name}
-                    onClick={() => applyPreset(p)}
-                    className={`text-[11px] py-1.5 rounded ${activePreset === p.name ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700'}`}
-                  >
-                    {p.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="border-t border-gray-800 pt-1.5 text-[10px] text-gray-400 leading-snug">
-              <div className="font-semibold text-gray-300 mb-0.5">Active: {activeTool}</div>
-              right-drag = W/L · middle = pan · wheel = slice
-            </div>
-          </div>
-        )}
         </div>
       </div>
     </div>
@@ -1182,15 +1662,28 @@ export default function CBCTViewerPage() {
  * Inactive tabs render as ghost buttons with a tooltip explaining what
  * phase they belong to so the user can see the roadmap inline.
  */
-function ViewModeTab({ active = false, label, tooltip }) {
+function ViewModeTab({ active = false, ready = true, label, tooltip, onClick }) {
+  // Three states: active (selected), ready (clickable, not active), placeholder
+  // (greyed, tooltip explains why it's coming later).
+  if (!ready) {
+    return (
+      <button
+        title={tooltip || label}
+        disabled
+        className="px-2.5 py-1 rounded text-[11px] tracking-wide bg-transparent text-gray-600 cursor-help"
+      >
+        {label}
+      </button>
+    );
+  }
   return (
     <button
       title={tooltip || label}
-      disabled={!active}
+      onClick={onClick}
       className={`px-2.5 py-1 rounded text-[11px] tracking-wide transition-colors ${
         active
           ? 'bg-amber-600 text-white cursor-default'
-          : 'bg-transparent text-gray-500 hover:text-gray-300 cursor-help'
+          : 'bg-transparent text-gray-300 hover:bg-gray-800'
       }`}
     >
       {label}
@@ -1203,6 +1696,18 @@ function ViewModeTab({ active = false, label, tooltip }) {
  * tool is active. `danger=true` shifts the hover state to red for
  * destructive actions (e.g. clear measurements).
  */
+/**
+ * Tiny section header label used between groups in the left rail.
+ * Keeps the panel scannable without dominating with bold dividers.
+ */
+function SectionHeader({ children }) {
+  return (
+    <div className="text-[9px] uppercase tracking-wider text-gray-500 mb-1 mt-2 first:mt-0">
+      {children}
+    </div>
+  );
+}
+
 function ToolButton({ active, onClick, icon: Icon, label, danger = false }) {
   return (
     <button

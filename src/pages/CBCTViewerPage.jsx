@@ -113,9 +113,47 @@ export default function CBCTViewerPage() {
 
         setStage('loading-volume');
 
-        // Create the volume. Pixel data streams in via background fetches +
-        // WASM decode. The viewports refresh as data arrives.
-        const volume = await cornerstone.volumeLoader.createAndCacheVolume(volumeId, { imageIds });
+        // Pre-load every instance so the metadata providers are populated
+        // BEFORE we ask the volume loader to sort by ImagePositionPatient.
+        // Without this, the streaming volume loader creates a volume with
+        // slices in arbitrary order — axial looks fine (just shows one
+        // slice) but coronal + sagittal sample across mis-ordered Z and
+        // produce diagonal-stripe garbage. Pre-loading takes ~10-30s for
+        // a 400-slice CBCT but is mandatory for correct MPR geometry.
+        let loaded = 0;
+        await Promise.all(imageIds.map(async (id) => {
+          try {
+            await cornerstone.imageLoader.loadAndCacheImage(id);
+          } catch (e) {
+            console.warn('[cbct] image preload failed for', id, e?.message);
+          } finally {
+            loaded += 1;
+            // Throttle progress updates so React isn't crushed by 400 setStates
+            if (loaded % 5 === 0 || loaded === imageIds.length) {
+              setProgress(Math.round((loaded / imageIds.length) * 100));
+            }
+          }
+        }));
+        if (cancelled) return;
+
+        // Sort by image position. Cornerstone's helper reads the now-cached
+        // metadata and returns the correct slice order + spacing.
+        let sortedImageIds = imageIds;
+        try {
+          const result = cornerstone.utilities.sortImageIdsAndGetSpacing
+            ? cornerstone.utilities.sortImageIdsAndGetSpacing(imageIds)
+            : { sortedImageIds: imageIds };
+          if (Array.isArray(result?.sortedImageIds) && result.sortedImageIds.length > 0) {
+            sortedImageIds = result.sortedImageIds;
+          } else if (Array.isArray(result)) {
+            sortedImageIds = result;
+          }
+        } catch (sortErr) {
+          console.warn('[cbct] sortImageIdsAndGetSpacing failed:', sortErr?.message);
+        }
+
+        // Now build the volume from sorted IDs.
+        const volume = await cornerstone.volumeLoader.createAndCacheVolume(volumeId, { imageIds: sortedImageIds });
         if (cancelled) return;
 
         // Build rendering engine + viewports
@@ -142,20 +180,12 @@ export default function CBCTViewerPage() {
         }));
         engine.setViewports(viewportInputs);
 
-        // Start streaming. Cornerstone fires per-frame events as slices
-        // decode and land in the volume buffer.
-        volume.load((evt) => {
-          if (cancelled) return;
-          if (typeof evt?.framesProcessed === 'number' && typeof evt?.totalNumFrames === 'number') {
-            setProgress(Math.round((evt.framesProcessed / evt.totalNumFrames) * 100));
-          }
-        });
+        // Pixels are already cached from the pre-load above; calling load()
+        // populates the volume's voxel buffer from those cached images. Fast.
+        volume.load();
 
         // Bind the volume to all 4 viewports
-        await cornerstone.volumeLoader.createAndCacheVolume; // (no-op alias for clarity)
-        const setVolumesForViewports = (await import('@cornerstonejs/core'))
-          .setVolumesForViewports;
-        await setVolumesForViewports(
+        await cornerstone.setVolumesForViewports(
           engine,
           [{ volumeId }],
           VIEWPORTS.map((v) => v.id),

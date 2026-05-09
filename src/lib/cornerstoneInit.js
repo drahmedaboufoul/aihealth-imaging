@@ -10,7 +10,7 @@
  * calls are no-ops thanks to the `initialized` guard.
  */
 
-import { init as csInit, imageLoader, volumeLoader, Enums, RenderingEngine, getRenderingEngine, metaData, eventTarget, cache } from '@cornerstonejs/core';
+import { init as csInit, imageLoader, volumeLoader, Enums, RenderingEngine, getRenderingEngine, metaData, eventTarget, cache, utilities as csUtilities, setVolumesForViewports } from '@cornerstonejs/core';
 import { init as toolsInit, addTool, ToolGroupManager, WindowLevelTool, PanTool, ZoomTool, StackScrollTool, TrackballRotateTool, CrosshairsTool, Enums as toolsEnums, utilities as toolsUtilities } from '@cornerstonejs/tools';
 import { init as dicomImageLoaderInit, wadouri, wadors } from '@cornerstonejs/dicom-image-loader';
 
@@ -57,6 +57,8 @@ export const cornerstone = {
   metaData,
   eventTarget,
   cache,
+  utilities: csUtilities,
+  setVolumesForViewports,
 };
 
 export const cornerstoneTools = {

@@ -41,6 +41,7 @@ const PANEL_BG = '#15181c';
 const RENDERING_ENGINE_ID = 'aihCbctRenderingEngine';
 const TOOL_GROUP_MPR_ID   = 'aihCbctMprToolGroup';
 const TOOL_GROUP_3D_ID    = 'aihCbct3dToolGroup';
+const VOI_SYNC_ID         = 'aihCbctVoiSync';
 
 // Two preset tables — one for HU-scaled CT, one for raw 12-bit CBCT data
 // (most cone-beam scanners ship without rescale slope/intercept). We pick
@@ -508,6 +509,30 @@ export default function CBCTViewerPage() {
         vrGroup.setToolActive(cornerstoneTools.ZoomTool.toolName, {
           bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Wheel }],
         });
+
+        // VOI synchronizer — when the user adjusts W/L on any MPR panel,
+        // the same voiRange is mirrored to the other two so all three
+        // planes stay in the same window. Without this, right-drag on
+        // axial only changes axial (which the user correctly flagged).
+        try {
+          // Destroy any leftover synchronizer from a previous mount
+          try {
+            cornerstoneTools.SynchronizerManager?.destroySynchronizer?.(VOI_SYNC_ID);
+          } catch {}
+          const voiSync = cornerstoneTools.synchronizers?.createVOISynchronizer
+            ? cornerstoneTools.synchronizers.createVOISynchronizer(VOI_SYNC_ID)
+            : null;
+          if (voiSync) {
+            for (const id of MPR_VIEWPORT_IDS) {
+              voiSync.add({ renderingEngineId: RENDERING_ENGINE_ID, viewportId: id });
+            }
+            console.log('[cbct] VOI synchronizer attached across MPR viewports');
+          } else {
+            console.warn('[cbct] createVOISynchronizer not available — W/L will not sync');
+          }
+        } catch (syncErr) {
+          console.warn('[cbct] VOI synchronizer setup failed:', syncErr?.message);
+        }
 
         engine.render();
         setStage('ready');

@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { resolveStudyDicomFiles, resolveStudyNiftiVolume } from '../lib/signedUrl';
 import { loadNiftiVolume } from '../lib/niftiLoader';
+import { renderArchPano, getVolumeScalarData, densifyArch } from '../lib/archPano';
 import {
   initCornerstone,
   imageIdFromSignedUrl,
@@ -112,10 +113,10 @@ const VIEW_MODES = {
   'pano': {
     name: 'Pano',
     ready: true,
-    layout: 'single',
-    description: 'Reformatted panoramic. Current: thick coronal MIP through the dental arch. v2: arch-curve tracing.',
+    layout: 'arch-pano',
+    description: 'True reformatted panoramic. Click points on the axial inset to define the dental arch; pano regenerates from the curve.',
     viewports: [
-      { id: 'PANO_VIEW', label: 'Pano (coronal MIP)', orientationKey: 'CORONAL', color: '#10b981', kind: 'orthographic', slabMM: 30, blendMode: 'MIP' },
+      { id: 'PANO_AXIAL', label: 'Axial — click to trace arch', orientationKey: 'AXIAL', color: '#10b981', kind: 'orthographic' },
     ],
   },
   'crosssec': {
@@ -665,6 +666,13 @@ export default function CBCTViewerPage() {
   // AI segmentation modal — Phase 4 stub. Shows planned features and a
   // status indicator so the user (and we) can see the roadmap.
   const [showAiModal, setShowAiModal] = useState(false);
+
+  // Phase 3.2 arch-curve Pano state. archPoints is an array of [worldX, worldY]
+  // captured from user clicks on the axial viewport. The pano canvas
+  // re-renders whenever the points or VOI change.
+  const [archPoints, setArchPoints]   = useState([]);
+  const [archSlabMM, setArchSlabMM]   = useState(8); // perp slab thickness mm
+  const panoCanvasRef                 = useRef(null);
 
   // Cached volume + last loaded volumeId, for fast view-mode rebuilds
   // without reloading the volume.
@@ -1392,6 +1400,10 @@ export default function CBCTViewerPage() {
     const volumeId = cachedVolumeIdRef.current;
     if (!engine || !volume || !volumeId) return;
     setViewMode(modeKey);
+    // Layout may change DOM (arch-pano vs grid). Wait for React to
+    // commit the new structure before binding viewports.
+    await new Promise((r) => requestAnimationFrame(r));
+    await new Promise((r) => requestAnimationFrame(r));
     // Build new viewport inputs.
     const Enums = cornerstone.Enums;
     const elements = {
@@ -1464,6 +1476,79 @@ export default function CBCTViewerPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [stage]);
+
+  // ── Phase 3.2 arch-curve Pano ──────────────────────────────────────
+  // In Pano mode, capture clicks on the axial viewport and store the
+  // corresponding WORLD coordinates as arch control points. The pano
+  // canvas re-renders whenever points (or W/L / slab) change.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    if (viewMode !== 'pano') return;
+    const engine = enginRef.current;
+    if (!engine) return;
+    // Only the axial viewport in Pano mode (we reuse axialRef as the
+    // single Cornerstone viewport in this mode). Its viewportId is
+    // 'PANO_AXIAL' per VIEW_MODES.
+    const vp = engine.getViewport('PANO_AXIAL');
+    if (!vp) return;
+    const el = vp.element;
+    if (!el) return;
+
+    const onClick = (e) => {
+      // Only react to LEFT-click on the canvas itself; ignore right /
+      // middle / drag (those are W/L / pan / etc.).
+      if (e.button !== 0) return;
+      // Tool group binding has Primary = Crosshair by default. For arch
+      // tracing we want left-click to add a point — but ONLY when no
+      // measurement tool is active. Easiest: hold Shift to add an arch
+      // point. Otherwise the click goes through to the active tool.
+      if (!e.shiftKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Use viewport.canvasToWorld() to convert click pixels → world mm
+      const rect = el.getBoundingClientRect();
+      const canvasPos = [e.clientX - rect.left, e.clientY - rect.top];
+      const world = vp.canvasToWorld(canvasPos);
+      if (!world) return;
+      // Store as [x, y] (the Z is fixed on the current axial slice;
+      // we ignore it because pano always samples the full Z range).
+      setArchPoints((prev) => [...prev, [world[0], world[1]]]);
+    };
+
+    el.addEventListener('mousedown', onClick, { capture: true });
+    return () => el.removeEventListener('mousedown', onClick, { capture: true });
+  }, [stage, viewMode]);
+
+  // Render the pano canvas whenever points / VOI / slab changes.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    if (viewMode !== 'pano') return;
+    const canvas = panoCanvasRef.current;
+    const volume = cachedVolumeRef.current;
+    if (!canvas || !volume || archPoints.length < 3) return;
+    const scalarData = getVolumeScalarData(volume);
+    if (!scalarData) return;
+    const preset = presetTable.find((p) => p.name === activePreset) || presetTable[0];
+    const voi = preset
+      ? { lower: preset.wc - preset.ww / 2, upper: preset.wc + preset.ww / 2 }
+      : { lower: -1000, upper: 3000 };
+    renderArchPano(canvas, {
+      scalarData,
+      dimensions: Array.isArray(volume.dimensions) ? volume.dimensions : [
+        volume.imageData.getDimensions()[0],
+        volume.imageData.getDimensions()[1],
+        volume.imageData.getDimensions()[2],
+      ],
+      spacing: Array.isArray(volume.spacing) ? volume.spacing : volume.imageData.getSpacing(),
+      origin: Array.isArray(volume.origin) ? volume.origin : volume.imageData.getOrigin(),
+      archPoints,
+      slabMM: archSlabMM,
+      voi,
+      panoWidth: 900,
+      panoHeight: 400,
+      flipZ: true,
+    });
+  }, [stage, viewMode, archPoints, archSlabMM, activePreset, presetTable]);
 
   // ── Annotation list refresh ────────────────────────────────────────
   // Cornerstone fires ANNOTATION_MODIFIED / ANNOTATION_COMPLETED /
@@ -1735,6 +1820,104 @@ export default function CBCTViewerPage() {
           </div>
         )}
 
+        {/* Arch-curve Pano gets its own layout: axial-with-tracer (left)
+            + custom rendered <canvas> for the reformatted pano (right).
+            Falls through to the standard grid for other modes. */}
+        {viewMode === 'pano' && VIEW_MODES.pano.ready && (
+          <div className="grid grid-cols-2 gap-px h-full" style={{ backgroundColor: '#1d2128' }}>
+            {/* Cell 1: axial Cornerstone viewport with arch-point overlay */}
+            <div className="relative" style={{ backgroundColor: SHELL_BG }}>
+              <div
+                ref={axialRef}
+                className="w-full h-full"
+                onContextMenu={(e) => e.preventDefault()}
+              />
+              <div
+                className="absolute top-2 left-2 text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded pointer-events-none"
+                style={{ backgroundColor: 'rgba(11,13,16,0.6)', color: '#10b981', borderLeft: '2px solid #10b981' }}
+              >
+                Axial &middot; Shift+Click to trace arch
+              </div>
+              {/* SVG overlay for arch points + spline preview */}
+              <ArchOverlay
+                viewportId="PANO_AXIAL"
+                engine={enginRef.current}
+                archPoints={archPoints}
+              />
+              {/* Floating tools card — arch controls */}
+              <div
+                className="absolute bottom-3 left-3 rounded-lg p-2.5 text-xs space-y-1.5"
+                style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128', width: 220 }}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400">Arch points</span>
+                  <span className="font-mono text-amber-300">{archPoints.length}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-gray-400 text-[10px]">Slab mm</span>
+                  <input
+                    type="range"
+                    min={2}
+                    max={20}
+                    step={1}
+                    value={archSlabMM}
+                    onChange={(e) => setArchSlabMM(Number(e.target.value))}
+                    className="flex-1 accent-amber-600"
+                  />
+                  <span className="font-mono text-[10px] text-amber-300 w-6 text-right">{archSlabMM}</span>
+                </div>
+                <div className="flex gap-1 pt-1">
+                  <button
+                    onClick={() => setArchPoints((p) => p.slice(0, -1))}
+                    disabled={archPoints.length === 0}
+                    className="flex-1 text-[10px] py-1 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300"
+                  >
+                    Undo last
+                  </button>
+                  <button
+                    onClick={() => setArchPoints([])}
+                    disabled={archPoints.length === 0}
+                    className="flex-1 text-[10px] py-1 rounded bg-gray-800 hover:bg-red-700 disabled:opacity-40 text-gray-300 hover:text-white"
+                  >
+                    Reset
+                  </button>
+                </div>
+                <p className="text-[10px] text-gray-500 leading-tight pt-1 border-t border-gray-800">
+                  Click ≥3 points along the dental arch on axial. The pano on the right regenerates in real time.
+                </p>
+              </div>
+            </div>
+            {/* Cell 2: pano canvas (custom render) */}
+            <div className="relative flex items-center justify-center" style={{ backgroundColor: SHELL_BG }}>
+              <canvas
+                ref={panoCanvasRef}
+                className="max-w-full max-h-full"
+                style={{ imageRendering: 'pixelated' }}
+              />
+              {archPoints.length < 3 && (
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <div className="text-center max-w-xs px-4">
+                    <div className="text-amber-500 text-xs uppercase tracking-wider mb-2">Trace the arch</div>
+                    <p className="text-gray-400 text-xs leading-relaxed">
+                      On the axial view (left), <span className="text-gray-200 font-semibold">Shift+Click</span> at
+                      least 3 points along the midline of the dental arch
+                      (anterior → premolar → molar → posterior).
+                    </p>
+                  </div>
+                </div>
+              )}
+              <div
+                className="absolute top-2 left-2 text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded pointer-events-none"
+                style={{ backgroundColor: 'rgba(11,13,16,0.6)', color: '#f59e0b', borderLeft: '2px solid #f59e0b' }}
+              >
+                Pano (reformatted)
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Standard view layouts (everything except arch-pano) */}
+        {(viewMode !== 'pano' || !VIEW_MODES.pano.ready) && (
         <div
           className={
             VIEW_MODES[viewMode]?.layout === 'side-by-side'
@@ -1794,6 +1977,7 @@ export default function CBCTViewerPage() {
             );
           })}
         </div>
+        )}
 
         </div>
       </div>
@@ -1840,6 +2024,103 @@ export default function CBCTViewerPage() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * SVG overlay drawn above the axial Pano viewport showing the user's
+ * arch control points and the Catmull-Rom spline through them.
+ * Re-renders on every archPoints change via cornerstone CAMERA_MODIFIED
+ * (so pan/zoom on axial keep the overlay aligned).
+ */
+function ArchOverlay({ viewportId, engine, archPoints }) {
+  const [, force] = useState(0);
+  const svgRef = useRef(null);
+
+  // Listen for camera modifications so we re-project world points to
+  // canvas coords (zoom/pan/scroll keeps the overlay accurate).
+  useEffect(() => {
+    if (!engine) return;
+    const handler = (e) => {
+      if (e?.detail?.viewportId === viewportId) force((n) => n + 1);
+    };
+    cornerstone.eventTarget.addEventListener(
+      cornerstone.Enums.Events.CAMERA_MODIFIED, handler
+    );
+    return () => {
+      try {
+        cornerstone.eventTarget.removeEventListener(
+          cornerstone.Enums.Events.CAMERA_MODIFIED, handler
+        );
+      } catch {}
+    };
+  }, [engine, viewportId]);
+
+  if (!engine || archPoints.length === 0) return null;
+  const vp = engine.getViewport(viewportId);
+  if (!vp || !vp.element) return null;
+  const rect = vp.element.getBoundingClientRect();
+  const containerRect = vp.element.parentElement?.getBoundingClientRect();
+  if (!containerRect) return null;
+  const offsetTop  = rect.top  - containerRect.top;
+  const offsetLeft = rect.left - containerRect.left;
+
+  // Convert each world (x, y) point to canvas (x, y). We use the current
+  // axial Z by querying the focal point — but actually we just project
+  // through canvasToWorld inverse: we need worldToCanvas.
+  const project = (worldXY) => {
+    try {
+      // worldToCanvas wants 3D — supply current focal Z so the projection
+      // works on the active axial plane.
+      const camera = vp.getCamera();
+      const z = camera?.focalPoint?.[2] ?? 0;
+      return vp.worldToCanvas([worldXY[0], worldXY[1], z]);
+    } catch {
+      return null;
+    }
+  };
+  const projected = archPoints.map(project).filter(Boolean);
+  if (projected.length === 0) return null;
+
+  // Build a smooth Catmull-Rom path through projected points
+  const splinePoints =
+    archPoints.length >= 2
+      ? densifyArch(archPoints, 120)
+          .map((s) => project([s.x, s.y]))
+          .filter(Boolean)
+      : [];
+  const pathD = splinePoints.length
+    ? 'M ' + splinePoints.map(([x, y]) => `${x.toFixed(1)} ${y.toFixed(1)}`).join(' L ')
+    : '';
+
+  return (
+    <svg
+      ref={svgRef}
+      className="absolute pointer-events-none"
+      style={{
+        top: offsetTop, left: offsetLeft,
+        width: rect.width, height: rect.height,
+      }}
+    >
+      {pathD && (
+        <path
+          d={pathD}
+          fill="none"
+          stroke="#f59e0b"
+          strokeWidth={2}
+          strokeDasharray="0"
+          opacity={0.9}
+        />
+      )}
+      {projected.map(([x, y], i) => (
+        <g key={i}>
+          <circle cx={x} cy={y} r={5} fill="#f59e0b" stroke="#0b0d10" strokeWidth={1.5} />
+          <text x={x + 8} y={y - 8} fill="#f59e0b" fontSize={10} fontFamily="monospace">
+            {i + 1}
+          </text>
+        </g>
+      ))}
+    </svg>
   );
 }
 

@@ -760,6 +760,11 @@ export default function CBCTViewerPage() {
   const [nervePoints, setNervePoints]     = useState([]);
   const [tracingNerve, setTracingNerve]   = useState(false);
   const [safetyZoneMM, setSafetyZoneMM]   = useState(2);
+  // How thick a slab around the active slice plane to highlight the
+  // nerve in. User-adjustable so they can widen if the nerve disappears
+  // between slices, or narrow for surgical precision. Default 5mm gives
+  // a generous view; 2mm matches the actual canal diameter.
+  const [nerveSlabMM, setNerveSlabMM]     = useState(5);
 
   // Phase 3.4 implant placement. implants is an array of:
   //   { id, apex: [x,y,z], head: [x,y,z], diameterMM, lengthMM, label }
@@ -2103,6 +2108,19 @@ export default function CBCTViewerPage() {
                     />
                     <span className="font-mono text-green-400 w-7 text-right">{safetyZoneMM}mm</span>
                   </div>
+                  <div className="flex items-center justify-between gap-2 text-[10px] text-gray-400">
+                    <span title="How thick a slab to highlight bright on each MPR slice">Slab</span>
+                    <input
+                      type="range"
+                      min={1}
+                      max={20}
+                      step={1}
+                      value={nerveSlabMM}
+                      onChange={(e) => setNerveSlabMM(Number(e.target.value))}
+                      className="flex-1 accent-green-600"
+                    />
+                    <span className="font-mono text-green-400 w-7 text-right">{nerveSlabMM}mm</span>
+                  </div>
                   <div className="flex gap-1">
                     <button
                       onClick={() => setNervePoints((p) => p.slice(0, -1))}
@@ -2418,6 +2436,7 @@ export default function CBCTViewerPage() {
                     engine={enginRef.current}
                     nervePoints={nervePoints}
                     safetyZoneMM={safetyZoneMM}
+                    slabHalfMM={nerveSlabMM / 2}
                   />
                 )}
                 {/* Implant cylinder overlays */}
@@ -2593,7 +2612,7 @@ function ArchOverlay({ viewportId, engine, archPoints }) {
  * would also clip the polyline to a thin slab around the active slice;
  * for v1 we just dim by signed distance to the slice plane.
  */
-function NerveOverlay({ viewportId, engine, nervePoints, safetyZoneMM }) {
+function NerveOverlay({ viewportId, engine, nervePoints, safetyZoneMM, slabHalfMM = 2.5 }) {
   const [, force] = useState(0);
   useEffect(() => {
     if (!engine) return;
@@ -2641,10 +2660,31 @@ function NerveOverlay({ viewportId, engine, nervePoints, safetyZoneMM }) {
     (p[1] - viewFocal[1]) * viewPlaneNormal[1] +
     (p[2] - viewFocal[2]) * viewPlaneNormal[2];
 
-  // Half-thickness of the visibility slab. 2.5mm covers the typical
-  // mandibular canal diameter plus a margin so the nerve doesn't
-  // disappear when you scroll by one slice.
-  const slabHalfMM = 2.5;
+  // slabHalfMM comes in as a prop now — user-adjustable via the
+  // "Nerve slab" slider in the left rail. Default 2.5mm covers the
+  // typical canal diameter; wider is more forgiving for scrolling.
+
+  // Always render the FULL polyline as a ghost (low-opacity dashed
+  // line) so the clinician keeps spatial context even when scrolling
+  // away from the canal. The in-slab portion gets layered bright over
+  // top. This solves the previous UX problem where the nerve seemed
+  // to vanish entirely on far slices.
+  const ghostSegments = [];
+  for (let i = 0; i < nervePoints.length - 1; i++) {
+    try {
+      const a = vp.worldToCanvas(nervePoints[i]);
+      const b = vp.worldToCanvas(nervePoints[i + 1]);
+      if (a && b) ghostSegments.push({ start: a, end: b });
+    } catch {}
+  }
+  // Also project all control points for ghost rendering
+  const ghostDots = [];
+  for (let i = 0; i < nervePoints.length; i++) {
+    try {
+      const c = vp.worldToCanvas(nervePoints[i]);
+      if (c) ghostDots.push({ canvas: c, idx: i });
+    } catch {}
+  }
 
   // For each polyline segment, geometrically clip it to the slab.
   // Returns array of {canvasStart, canvasEnd, fullyInside}.
@@ -2699,44 +2739,6 @@ function NerveOverlay({ viewportId, engine, nervePoints, safetyZoneMM }) {
     } catch {}
   }
 
-  // If nothing is in the slab, render a small "off-plane" indicator
-  // so the user knows the nerve exists but is above/below this slice.
-  if (segments.length === 0 && visibleDots.length === 0) {
-    // Find the closest nerve point and show a hint
-    let closest = null;
-    let closestDist = Infinity;
-    for (const p of nervePoints) {
-      const d = signedDist(p);
-      if (Math.abs(d) < closestDist) {
-        closest = p;
-        closestDist = Math.abs(d);
-      }
-    }
-    if (!closest) return null;
-    let canvas;
-    try { canvas = vp.worldToCanvas(closest); } catch {}
-    if (!canvas) return null;
-    const direction = signedDist(closest) > 0 ? '↑' : '↓';
-    return (
-      <svg
-        className="absolute pointer-events-none"
-        style={{ top, left, width: rect.width, height: rect.height }}
-      >
-        <text
-          x={canvas[0]}
-          y={canvas[1]}
-          fill="#22c55e"
-          fontSize={10}
-          fontFamily="monospace"
-          opacity={0.5}
-          textAnchor="middle"
-        >
-          nerve {direction} {Math.abs(closestDist).toFixed(0)}mm
-        </text>
-      </svg>
-    );
-  }
-
   // Estimate pixels-per-mm from the camera so we can render the safety
   // tube radius accurately on this viewport.
   let pxPerMM = 1;
@@ -2748,44 +2750,94 @@ function NerveOverlay({ viewportId, engine, nervePoints, safetyZoneMM }) {
   } catch {}
   const safetyPx = Math.max(1, safetyZoneMM * pxPerMM);
 
-  // Build a path string from the clipped segments.
-  const pathD = segments
+  // Build path strings for the two layers.
+  const ghostPathD = ghostSegments
     .map((s) => `M ${s.start[0].toFixed(1)} ${s.start[1].toFixed(1)} L ${s.end[0].toFixed(1)} ${s.end[1].toFixed(1)}`)
     .join(' ');
+  const brightPathD = segments
+    .map((s) => `M ${s.start[0].toFixed(1)} ${s.start[1].toFixed(1)} L ${s.end[0].toFixed(1)} ${s.end[1].toFixed(1)}`)
+    .join(' ');
+
+  // Find closest-off-plane indicator text (helps user scroll toward the
+  // nerve when nothing is in-slab on this view).
+  let offPlaneHint = null;
+  if (segments.length === 0 && visibleDots.length === 0) {
+    let closest = null;
+    let closestDist = Infinity;
+    for (const p of nervePoints) {
+      const d = Math.abs(signedDist(p));
+      if (d < closestDist) { closest = p; closestDist = d; }
+    }
+    if (closest) {
+      try {
+        const c = vp.worldToCanvas(closest);
+        if (c) {
+          const dir = signedDist(closest) > 0 ? '↑' : '↓';
+          offPlaneHint = { x: c[0], y: c[1], dist: closestDist, dir };
+        }
+      } catch {}
+    }
+  }
 
   return (
     <svg
       className="absolute pointer-events-none"
       style={{ top, left, width: rect.width, height: rect.height }}
     >
-      {/* Safety-zone halo (thicker, translucent, sits under the line) */}
-      {pathD && (
+      {/* Ghost polyline — always visible at low opacity so the user
+          retains 3D spatial context for the nerve path even on slices
+          that don't intersect the canal. Dashed to distinguish from
+          in-slab. */}
+      {ghostPathD && (
         <path
-          d={pathD}
+          d={ghostPathD}
+          fill="none"
+          stroke="#22c55e"
+          strokeWidth={1.5}
+          strokeDasharray="3 3"
+          strokeLinecap="round"
+          opacity={0.22}
+        />
+      )}
+      {/* Ghost control point markers — small + faint */}
+      {ghostDots.map(({ canvas: [x, y], idx }) => (
+        <circle
+          key={`g${idx}`}
+          cx={x}
+          cy={y}
+          r={2}
+          fill="#22c55e"
+          opacity={0.35}
+        />
+      ))}
+      {/* Bright safety-zone halo for the in-slab portion */}
+      {brightPathD && (
+        <path
+          d={brightPathD}
           fill="none"
           stroke="#22c55e"
           strokeWidth={safetyPx * 2}
           strokeLinecap="round"
           strokeLinejoin="round"
-          opacity={0.18}
+          opacity={0.22}
         />
       )}
-      {/* Nerve canal centerline */}
-      {pathD && (
+      {/* Bright in-slab centerline */}
+      {brightPathD && (
         <path
-          d={pathD}
+          d={brightPathD}
           fill="none"
           stroke="#22c55e"
-          strokeWidth={2}
+          strokeWidth={2.5}
           strokeLinecap="round"
           strokeLinejoin="round"
-          opacity={0.95}
+          opacity={0.98}
         />
       )}
-      {/* In-slab control points */}
+      {/* Bright in-slab control points */}
       {visibleDots.map(({ canvas: [x, y], idx }) => (
         <circle
-          key={idx}
+          key={`b${idx}`}
           cx={x}
           cy={y}
           r={4}
@@ -2794,6 +2846,20 @@ function NerveOverlay({ viewportId, engine, nervePoints, safetyZoneMM }) {
           strokeWidth={1.5}
         />
       ))}
+      {/* Off-plane hint label */}
+      {offPlaneHint && (
+        <text
+          x={offPlaneHint.x}
+          y={offPlaneHint.y - 8}
+          fill="#22c55e"
+          fontSize={10}
+          fontFamily="monospace"
+          opacity={0.85}
+          textAnchor="middle"
+        >
+          nerve {offPlaneHint.dir} {offPlaneHint.dist.toFixed(0)}mm — scroll
+        </text>
+      )}
     </svg>
   );
 }

@@ -32,7 +32,7 @@ import {
   Activity, Trash2, Plus, Save, Sparkles,
   Eye, EyeOff, Contrast, Layers, ChevronRight,
   Square, Circle as CircleIcon, Hexagon, Cylinder,
-  Zap, GitBranch,
+  Zap, GitBranch, ExternalLink,
 } from 'lucide-react';
 import { resolveStudyDicomFiles, resolveStudyNiftiVolume } from '../lib/signedUrl';
 import { loadNiftiVolume } from '../lib/niftiLoader';
@@ -738,6 +738,16 @@ export default function CBCTViewerPage() {
   // status indicator so the user (and we) can see the roadmap.
   const [showAiModal, setShowAiModal] = useState(false);
 
+  // Phase 3.6.2 — "Promote to Treatment Plan" dialog state.
+  // When the user has placed implants, they can promote the planning
+  // session into a formal treatment_plans row that flows into the EMR's
+  // billing + plan-acceptance pipeline.
+  const [showPromoteModal, setShowPromoteModal] = useState(false);
+  const [promoteTitle,     setPromoteTitle]     = useState('Implant treatment plan');
+  const [promoteFeePerImplant, setPromoteFeePerImplant] = useState(4500);
+  const [promotingPlan,    setPromotingPlan]    = useState(false);
+  const [promoteResult,    setPromoteResult]    = useState(null); // { planId } on success
+
   // Phase 3.2 arch-curve Pano state. archPoints is an array of [worldX, worldY]
   // captured from user clicks on the axial viewport. The pano canvas
   // re-renders whenever the points or VOI change.
@@ -1346,6 +1356,76 @@ export default function CBCTViewerPage() {
   // .state.getAllAnnotations() returns — we don't transform it, so a
   // future viewer can rehydrate exactly. RLS is already in place on
   // imaging_studies so this respects clinic scoping.
+  // Promote the current implant plan into a formal treatment_plans row
+  // in the EMR. Looks up the study's patient + clinic, generates a
+  // treatment_items array from the placed implants, and inserts the
+  // plan. RLS on treatment_plans is already in place by clinic_id.
+  const handlePromoteToTreatmentPlan = useCallback(async () => {
+    if (!studyId || implants.length === 0) return;
+    setPromotingPlan(true);
+    setPromoteResult(null);
+    try {
+      // 1. Look up the imaging study to get patient_id + clinic_id
+      const { data: study, error: sErr } = await supabase
+        .from('imaging_studies')
+        .select('id, patient_id, clinic_id, study_date')
+        .eq('id', studyId)
+        .single();
+      if (sErr) throw new Error('Study lookup failed: ' + sErr.message);
+      if (!study?.patient_id || !study?.clinic_id) {
+        throw new Error('Study is missing patient or clinic — cannot promote.');
+      }
+
+      // 2. Current user = doctor_id
+      const { data: { session } } = await supabase.auth.getSession();
+      const doctorId = session?.user?.id;
+      if (!doctorId) throw new Error('Not signed in.');
+
+      // 3. Build treatment_items from implants
+      const items = implants.map((imp, i) => ({
+        type: 'implant',
+        label: imp.label,
+        diameter_mm: imp.diameterMM,
+        length_mm: imp.lengthMM,
+        tooth_fdi: null, // user can map later in EMR
+        unit_price: Number(promoteFeePerImplant) || 0,
+        quantity: 1,
+        phase: 1,
+        notes: `Implant ${i + 1} from CBCT plan`,
+      }));
+      const totalAmount = items.reduce((s, it) => s + (it.unit_price || 0), 0);
+
+      // 4. Insert the plan
+      const { data: plan, error: pErr } = await supabase
+        .from('treatment_plans')
+        .insert({
+          patient_id: study.patient_id,
+          clinic_id:  study.clinic_id,
+          doctor_id:  doctorId,
+          imaging_study_id: study.id,
+          source: 'cbct_viewer',
+          title: promoteTitle || 'Implant treatment plan',
+          description: `Generated from CBCT viewer on ${new Date().toISOString().slice(0, 10)}. ` +
+                       `${implants.length} implant${implants.length > 1 ? 's' : ''} planned` +
+                       (nervePoints.length >= 2 ? `, IAN traced with ${safetyZoneMM}mm safety zone.` : '.'),
+          start_date: new Date().toISOString().slice(0, 10),
+          total_amount: totalAmount,
+          status: 'draft',
+          treatment_items: items,
+        })
+        .select('id')
+        .single();
+      if (pErr) throw new Error('Plan insert failed: ' + pErr.message);
+
+      setPromoteResult({ planId: plan.id, count: items.length, total: totalAmount });
+    } catch (e) {
+      console.error('[cbct] promote-to-plan failed:', e);
+      alert('Could not create plan: ' + (e?.message || e));
+    } finally {
+      setPromotingPlan(false);
+    }
+  }, [studyId, implants, promoteTitle, promoteFeePerImplant, nervePoints, safetyZoneMM]);
+
   const handleSaveMeasurements = useCallback(async () => {
     if (!studyId) return;
     try {
@@ -2072,6 +2152,13 @@ export default function CBCTViewerPage() {
                     })}
                   </div>
                   <button
+                    onClick={() => { setPromoteResult(null); setShowPromoteModal(true); }}
+                    className="w-full text-[10px] py-1.5 rounded bg-blue-700 hover:bg-blue-600 text-white flex items-center justify-center gap-1"
+                    title="Create a Treatment Plan in the EMR linked to this study"
+                  >
+                    <ExternalLink size={10} /> Promote to Plan
+                  </button>
+                  <button
                     onClick={() => setImplants([])}
                     className="w-full text-[10px] py-1 rounded bg-gray-800 hover:bg-red-700 text-gray-300 hover:text-white"
                   >Clear all implants</button>
@@ -2458,6 +2545,104 @@ export default function CBCTViewerPage() {
 
         </div>
       </div>
+
+      {/* Phase 3.6.2 — Promote-to-Treatment-Plan modal */}
+      {showPromoteModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          onClick={() => !promotingPlan && setShowPromoteModal(false)}
+        >
+          <div
+            className="rounded-lg p-5 max-w-md w-full mx-4 text-sm"
+            style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <Cylinder size={18} className="text-blue-400" />
+              <h2 className="text-base font-semibold text-white">Promote to Treatment Plan</h2>
+            </div>
+            {!promoteResult ? (
+              <>
+                <p className="text-gray-400 text-xs leading-relaxed mb-3">
+                  Creates a formal treatment plan in the EMR linked to this CBCT.
+                  Plan can then be priced, sent to the patient for acceptance, and
+                  flow into billing. You'll be able to refine in the EMR after creating.
+                </p>
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider text-gray-500 block mb-1">
+                      Title
+                    </label>
+                    <input
+                      type="text"
+                      value={promoteTitle}
+                      onChange={(e) => setPromoteTitle(e.target.value)}
+                      className="w-full text-sm px-2 py-1.5 rounded bg-gray-900 text-gray-100 border border-gray-700 focus:border-blue-500 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase tracking-wider text-gray-500 block mb-1">
+                      Fee per implant (AED)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={100}
+                      value={promoteFeePerImplant}
+                      onChange={(e) => setPromoteFeePerImplant(e.target.value)}
+                      className="w-full text-sm px-2 py-1.5 rounded bg-gray-900 text-gray-100 border border-gray-700 focus:border-blue-500 outline-none font-mono"
+                    />
+                    <div className="text-[10px] text-gray-500 mt-1">
+                      {implants.length} implant{implants.length > 1 ? 's' : ''} × {promoteFeePerImplant} = <span className="text-amber-300 font-mono">{(Number(promoteFeePerImplant) || 0) * implants.length} AED</span> total
+                    </div>
+                  </div>
+                  <div className="rounded p-2 text-[11px] text-gray-300" style={{ backgroundColor: '#0b0d10', border: '1px solid #1d2128' }}>
+                    <div className="font-semibold text-gray-200 mb-1">Plan will include:</div>
+                    <ul className="space-y-0.5 text-gray-400">
+                      {implants.map((imp, i) => (
+                        <li key={imp.id}>· {imp.label}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+                <div className="mt-4 flex gap-2 justify-end">
+                  <button
+                    onClick={() => setShowPromoteModal(false)}
+                    disabled={promotingPlan}
+                    className="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 disabled:opacity-50"
+                  >Cancel</button>
+                  <button
+                    onClick={handlePromoteToTreatmentPlan}
+                    disabled={promotingPlan || implants.length === 0}
+                    className="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    {promotingPlan && <Loader2 size={12} className="animate-spin" />}
+                    {promotingPlan ? 'Creating…' : 'Create Plan'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-green-400 text-sm mb-2">✓ Plan created.</p>
+                <p className="text-gray-300 text-xs leading-relaxed">
+                  {promoteResult.count} implant{promoteResult.count > 1 ? 's' : ''} added · <span className="font-mono">{promoteResult.total} AED</span> total.
+                </p>
+                <p className="text-gray-400 text-xs mt-2">
+                  Visible on the patient profile <span className="text-gray-200">Treatment Plans</span> tab
+                  and on the <span className="text-gray-200">Imaging</span> tab card. You can refine pricing,
+                  assign tooth numbers, and send to the patient from there.
+                </p>
+                <div className="mt-4 flex justify-end">
+                  <button
+                    onClick={() => setShowPromoteModal(false)}
+                    className="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200"
+                  >Close</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* AI segmentation modal — Phase 4 roadmap stub */}
       {showAiModal && (

@@ -32,6 +32,7 @@ import {
   Activity, Trash2, Plus, Save, Sparkles,
   Eye, EyeOff, Contrast, Layers, ChevronRight,
   Square, Circle as CircleIcon, Hexagon, Cylinder,
+  Zap, GitBranch,
 } from 'lucide-react';
 import { resolveStudyDicomFiles, resolveStudyNiftiVolume } from '../lib/signedUrl';
 import { loadNiftiVolume } from '../lib/niftiLoader';
@@ -676,6 +677,15 @@ export default function CBCTViewerPage() {
   const [xsWidthMM, setXsWidthMM] = useState(25);
   const xsCanvasRefs = useRef([]);
 
+  // Phase 3.5 nerve canal trace. nervePoints is an array of 3D world
+  // points [x, y, z]. tracingNerve enables Shift+Click capture on any
+  // MPR viewport. safetyZoneMM is the radius around the polyline
+  // rendered as an overlay (clinical default 2mm — inferior alveolar
+  // nerve injury risk threshold for implant proximity).
+  const [nervePoints, setNervePoints]     = useState([]);
+  const [tracingNerve, setTracingNerve]   = useState(false);
+  const [safetyZoneMM, setSafetyZoneMM]   = useState(2);
+
   // Cached volume + last loaded volumeId, for fast view-mode rebuilds
   // without reloading the volume.
   const cachedVolumeRef = useRef(null);
@@ -1269,6 +1279,8 @@ export default function CBCTViewerPage() {
         annotations: serialized,
         archPoints: archPoints,
         archSlabMM: archSlabMM,
+        nervePoints: nervePoints,
+        safetyZoneMM: safetyZoneMM,
       };
       const { error } = await supabase
         .from('imaging_studies')
@@ -1285,7 +1297,7 @@ export default function CBCTViewerPage() {
       console.warn('[cbct] save annotations failed:', e?.message);
       alert(`Save failed: ${e?.message || e}`);
     }
-  }, [studyId, archPoints, archSlabMM]);
+  }, [studyId, archPoints, archSlabMM, nervePoints, safetyZoneMM]);
 
   // Auto-load saved annotations once the viewer is ready (best-effort).
   useEffect(() => {
@@ -1330,7 +1342,18 @@ export default function CBCTViewerPage() {
           setArchPoints(savedArch);
         }
         if (typeof savedSlab === 'number') setArchSlabMM(savedSlab);
-        console.log('[cbct] restored', annList.length, 'annotations,', savedArch.length, 'arch points');
+        // Restore nerve trace
+        const savedNerve = !Array.isArray(saved) ? (saved.nervePoints || []) : [];
+        if (Array.isArray(savedNerve) && savedNerve.length >= 2) {
+          setNervePoints(savedNerve);
+        }
+        const savedSafety = !Array.isArray(saved) ? saved.safetyZoneMM : null;
+        if (typeof savedSafety === 'number') setSafetyZoneMM(savedSafety);
+        console.log(
+          '[cbct] restored', annList.length, 'annotations,',
+          savedArch.length, 'arch points,',
+          savedNerve.length, 'nerve points'
+        );
       } catch (e) {
         console.warn('[cbct] load annotations failed:', e?.message);
       }
@@ -1497,6 +1520,39 @@ export default function CBCTViewerPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [stage]);
+
+  // ── Phase 3.5 Nerve canal trace ────────────────────────────────────
+  // When "Trace nerve" is enabled, Shift+Click on ANY MPR viewport
+  // captures a 3D world point and appends to nervePoints. Renders as a
+  // green polyline + safety zone in each MPR overlay.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    if (!tracingNerve) return;
+    const engine = enginRef.current;
+    if (!engine) return;
+    // All MPR viewports across modes that have them
+    const ids = (VIEW_MODES[viewMode]?.viewports || [])
+      .filter((v) => v.kind === 'orthographic')
+      .map((v) => v.id);
+    const cleanups = [];
+    for (const id of ids) {
+      const vp = engine.getViewport(id);
+      if (!vp?.element) continue;
+      const el = vp.element;
+      const onClick = (e) => {
+        if (e.button !== 0 || !e.shiftKey) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = el.getBoundingClientRect();
+        const world = vp.canvasToWorld([e.clientX - rect.left, e.clientY - rect.top]);
+        if (!world) return;
+        setNervePoints((prev) => [...prev, [world[0], world[1], world[2]]]);
+      };
+      el.addEventListener('mousedown', onClick, { capture: true });
+      cleanups.push(() => el.removeEventListener('mousedown', onClick, { capture: true }));
+    }
+    return () => cleanups.forEach((fn) => fn());
+  }, [stage, tracingNerve, viewMode]);
 
   // ── Phase 3.2 arch-curve Pano ──────────────────────────────────────
   // In Pano mode, capture clicks on the axial viewport and store the
@@ -1807,6 +1863,49 @@ export default function CBCTViewerPage() {
               ))}
             </div>
 
+            {/* Section: Nerve canal trace */}
+            <SectionHeader>
+              Nerve canal {nervePoints.length > 0 && <span className="text-gray-500">({nervePoints.length})</span>}
+            </SectionHeader>
+            <div className="space-y-1 mb-2">
+              <button
+                onClick={() => setTracingNerve((v) => !v)}
+                className={`w-full text-[10px] py-1.5 rounded flex items-center justify-center gap-1.5 ${
+                  tracingNerve ? 'bg-green-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+              >
+                <GitBranch size={10} />
+                {tracingNerve ? 'Tracing — Shift+click MPR' : 'Trace nerve canal'}
+              </button>
+              {nervePoints.length > 0 && (
+                <>
+                  <div className="flex items-center justify-between gap-2 text-[10px] text-gray-400">
+                    <span>Safety zone</span>
+                    <input
+                      type="range"
+                      min={1}
+                      max={5}
+                      step={0.5}
+                      value={safetyZoneMM}
+                      onChange={(e) => setSafetyZoneMM(Number(e.target.value))}
+                      className="flex-1 accent-green-600"
+                    />
+                    <span className="font-mono text-green-400 w-7 text-right">{safetyZoneMM}mm</span>
+                  </div>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => setNervePoints((p) => p.slice(0, -1))}
+                      className="flex-1 text-[10px] py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300"
+                    >Undo</button>
+                    <button
+                      onClick={() => setNervePoints([])}
+                      className="flex-1 text-[10px] py-1 rounded bg-gray-800 hover:bg-red-700 text-gray-300 hover:text-white"
+                    >Clear</button>
+                  </div>
+                </>
+              )}
+            </div>
+
             {/* Section: AI (Phase 4 — surfaces architecture, real models later) */}
             <SectionHeader>AI · Phase 4</SectionHeader>
             <div className="grid grid-cols-1 gap-1 mb-2">
@@ -2100,6 +2199,16 @@ export default function CBCTViewerPage() {
                     {hud.current} / {hud.total}
                   </div>
                 )}
+                {/* Nerve canal polyline + safety zone overlay
+                    (only on MPR ortho viewports, hidden on 3D) */}
+                {cfg && cfg.kind === 'orthographic' && nervePoints.length >= 2 && (
+                  <NerveOverlay
+                    viewportId={cfg.id}
+                    engine={enginRef.current}
+                    nervePoints={nervePoints}
+                    safetyZoneMM={safetyZoneMM}
+                  />
+                )}
               </div>
             );
           })}
@@ -2247,6 +2356,134 @@ function ArchOverlay({ viewportId, engine, archPoints }) {
           </text>
         </g>
       ))}
+    </svg>
+  );
+}
+
+/**
+ * SVG overlay drawn above each MPR viewport showing the user-traced
+ * mandibular nerve canal as a polyline + a safety-zone tube radius.
+ * Re-projects on every CAMERA_MODIFIED event.
+ *
+ * Note: the nerve is a 3D polyline through patient space. On any given
+ * MPR slice, we project ALL points to canvas coordinates. Points that
+ * are far from the current slice plane are dimmed but still rendered
+ * so the user has spatial context. A clinical-accuracy implementation
+ * would also clip the polyline to a thin slab around the active slice;
+ * for v1 we just dim by signed distance to the slice plane.
+ */
+function NerveOverlay({ viewportId, engine, nervePoints, safetyZoneMM }) {
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!engine) return;
+    const handler = (e) => {
+      if (e?.detail?.viewportId === viewportId) force((n) => n + 1);
+    };
+    cornerstone.eventTarget.addEventListener(
+      cornerstone.Enums.Events.CAMERA_MODIFIED, handler
+    );
+    return () => {
+      try {
+        cornerstone.eventTarget.removeEventListener(
+          cornerstone.Enums.Events.CAMERA_MODIFIED, handler
+        );
+      } catch {}
+    };
+  }, [engine, viewportId]);
+
+  if (!engine || nervePoints.length < 2) return null;
+  const vp = engine.getViewport(viewportId);
+  if (!vp || !vp.element) return null;
+  const rect = vp.element.getBoundingClientRect();
+  const containerRect = vp.element.parentElement?.getBoundingClientRect();
+  if (!containerRect) return null;
+  const top  = rect.top  - containerRect.top;
+  const left = rect.left - containerRect.left;
+
+  // Signed distance from each nerve point to the current view plane,
+  // used for dimming. The view plane is defined by focal point + normal.
+  let viewPlaneNormal = [0, 0, 1];
+  let viewFocal = [0, 0, 0];
+  try {
+    const cam = vp.getCamera();
+    viewPlaneNormal = cam?.viewPlaneNormal || viewPlaneNormal;
+    viewFocal       = cam?.focalPoint     || viewFocal;
+  } catch {}
+  const distToPlane = (p) =>
+    (p[0] - viewFocal[0]) * viewPlaneNormal[0] +
+    (p[1] - viewFocal[1]) * viewPlaneNormal[1] +
+    (p[2] - viewFocal[2]) * viewPlaneNormal[2];
+
+  const projected = nervePoints
+    .map((p) => {
+      try {
+        const c = vp.worldToCanvas(p);
+        return c ? { canvas: c, distMM: Math.abs(distToPlane(p)) } : null;
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  if (projected.length < 2) return null;
+
+  // Polyline path
+  const pathD = 'M ' + projected.map(({ canvas: [x, y] }) => `${x.toFixed(1)} ${y.toFixed(1)}`).join(' L ');
+
+  // Estimate pixels-per-mm from the camera so we can render the safety
+  // tube radius accurately on this viewport.
+  let pxPerMM = 1;
+  try {
+    const dim = vp.getImageData?.()?.dimensions;
+    const spacing = vp.getImageData?.()?.spacing;
+    const parallelScale = vp.getCamera?.()?.parallelScale;
+    if (parallelScale && rect.height) {
+      // parallelScale is the half-height of the viewport in world mm.
+      pxPerMM = (rect.height / 2) / parallelScale;
+    }
+  } catch {}
+  const safetyPx = Math.max(1, safetyZoneMM * pxPerMM);
+
+  return (
+    <svg
+      className="absolute pointer-events-none"
+      style={{ top, left, width: rect.width, height: rect.height }}
+    >
+      {/* Safety-zone halo — drawn thicker, lower opacity, beneath line */}
+      <path
+        d={pathD}
+        fill="none"
+        stroke="#22c55e"
+        strokeWidth={safetyPx * 2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity={0.2}
+      />
+      {/* Nerve canal centerline */}
+      <path
+        d={pathD}
+        fill="none"
+        stroke="#22c55e"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity={0.95}
+      />
+      {/* Control points — opacity scaled by distance from view plane */}
+      {projected.map(({ canvas: [x, y], distMM }, i) => {
+        const op = Math.max(0.15, 1 - distMM / 30);
+        return (
+          <circle
+            key={i}
+            cx={x}
+            cy={y}
+            r={4}
+            fill="#22c55e"
+            stroke="#0b0d10"
+            strokeWidth={1.5}
+            opacity={op}
+          />
+        );
+      })}
     </svg>
   );
 }

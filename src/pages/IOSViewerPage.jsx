@@ -40,6 +40,9 @@ export default function IOSViewerPage() {
   const [files, setFiles] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Patient HUD info pulled from the study (when in study mode) so the
+  // viewer can label whose scan this is. Falls back to URL ?name= param.
+  const [hud, setHud] = useState(null); // { patientName, studyDate, studyType }
 
   // Viewer settings — same shape as EMR.
   // meshLayers is populated by MultiMeshModel after files load and supersedes
@@ -130,6 +133,22 @@ export default function IOSViewerPage() {
           })));
           setFileUrl(null);
           setFileName(`Case · ${arr.length} scan${arr.length !== 1 ? 's' : ''}`);
+          // Fetch the study + patient name for the HUD. Best-effort —
+          // failures here don't block rendering.
+          try {
+            const { data: study } = await supabase
+              .from('imaging_studies')
+              .select('study_type, study_date, customers(name)')
+              .eq('id', studyId)
+              .maybeSingle();
+            if (study && !cancelled) {
+              setHud({
+                patientName: study.customers?.name || queryName || null,
+                studyDate:   study.study_date,
+                studyType:   study.study_type,
+              });
+            }
+          } catch (_) {}
         } else {
           // Legacy single-file mode
           const r = await resolveSignedUrl({ id: fileId, path: filePath });
@@ -202,6 +221,32 @@ export default function IOSViewerPage() {
         <div className="absolute top-2 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
           <div className="bg-accent text-bg text-[11px] font-medium px-3 py-1 rounded-full shadow-lg">
             DEMO MODE — built-in mock mesh (visibility toggles + tools wired)
+          </div>
+        </div>
+      )}
+      {/* Patient HUD — top-right corner. Shows whose scan this is +
+          modality + date so clinicians always know what they're viewing. */}
+      {(hud?.patientName || queryName) && !isDemo && (
+        <div className="absolute top-3 right-3 z-40 pointer-events-none">
+          <div
+            className="text-[11px] font-mono rounded shadow-lg px-3 py-1.5 backdrop-blur-sm"
+            style={{ backgroundColor: 'rgba(11,13,16,0.78)', color: '#cdd2d8', border: '1px solid #1d2128' }}
+          >
+            <div className="font-semibold tracking-wide text-amber-300">
+              {hud?.patientName || queryName}
+            </div>
+            <div className="text-[9px] uppercase tracking-wider text-gray-400 mt-0.5 flex items-center gap-1.5">
+              {hud?.studyType && <span>{hud.studyType.replace(/_/g, ' ')}</span>}
+              {hud?.studyDate && (
+                <>
+                  <span className="text-gray-600">·</span>
+                  <span>{new Date(hud.studyDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</span>
+                </>
+              )}
+              {fileName && !hud?.studyType && (
+                <span>{fileName}</span>
+              )}
+            </div>
           </div>
         </div>
       )}

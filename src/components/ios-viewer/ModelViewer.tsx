@@ -321,32 +321,46 @@ function DentalModel({
 }
 
 // CameraAutoFit — frames whatever is in the scene to fit the camera frustum.
-// Runs once on mount + once when fileUrl/scan changes. Computes the bounding
-// box of the visible meshes, finds the bounding sphere, and positions the
-// camera at the right distance along +Z so the mesh fills ~80% of the view.
+// Runs on mount + when trigger changes. Computes the bounding box of the
+// visible meshes, finds the bounding sphere, and positions the camera at
+// the right distance along +Z so the mesh fills ~70% of the view.
+//
+// Retries up to 10 times over ~1 second if the scene is empty at first
+// frame — STL/PLY loading via loaders is async and the meshes may not be
+// in the scene yet on the very first paint. Previously the function ran
+// once and gave up, which caused the "viewer loads but model is invisible"
+// symptom unless the user toggled a layer to force re-fit.
 function CameraAutoFit({ trigger }: { trigger: any }) {
   const { camera, scene, controls } = useThree();
   useEffect(() => {
-    // Defer one frame to let geometry mount + materials settle
-    const id = requestAnimationFrame(() => {
+    let cancelled = false;
+    let attemptsLeft = 10;
+    const attempt = () => {
+      if (cancelled) return;
       const box = new THREE.Box3();
-      // Only fit to actual mesh content (skip lights, grid, helpers)
       scene.traverse((o: any) => {
         if (o.isMesh && o.geometry) {
           o.geometry.computeBoundingBox();
-          const childBox = o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld);
-          box.union(childBox);
+          if (o.geometry.boundingBox) {
+            const childBox = o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld);
+            box.union(childBox);
+          }
         }
       });
-      if (box.isEmpty()) return;
-      const size = box.getSize(new THREE.Vector3());
+      if (box.isEmpty()) {
+        // No meshes yet — try again next frame
+        if (attemptsLeft-- > 0) {
+          setTimeout(() => requestAnimationFrame(attempt), 100);
+        }
+        return;
+      }
       const center = box.getCenter(new THREE.Vector3());
       const sphere = new THREE.Sphere();
       box.getBoundingSphere(sphere);
       const radius = sphere.radius;
 
       const fov = (camera as THREE.PerspectiveCamera).fov * (Math.PI / 180);
-      const distance = (radius / Math.sin(fov / 2)) * 1.4; // 1.4 = ~70% fill, slight margin
+      const distance = (radius / Math.sin(fov / 2)) * 1.4;
 
       const dir = new THREE.Vector3(0, 0, 1);
       camera.position.copy(center.clone().add(dir.multiplyScalar(distance)));
@@ -359,8 +373,9 @@ function CameraAutoFit({ trigger }: { trigger: any }) {
         (controls as any).target.copy(center);
         (controls as any).update?.();
       }
-    });
-    return () => cancelAnimationFrame(id);
+    };
+    requestAnimationFrame(attempt);
+    return () => { cancelled = true; };
   }, [trigger, camera, scene, controls]);
   return null;
 }

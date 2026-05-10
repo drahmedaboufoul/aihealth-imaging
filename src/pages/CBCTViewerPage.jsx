@@ -81,6 +81,81 @@ const VIEWPORTS = [
 const MPR_VIEWPORT_IDS = ['CBCT_AXIAL', 'CBCT_CORONAL', 'CBCT_SAGITTAL'];
 
 /**
+ * Implant catalog — generic mainstream sizes across major brands.
+ * Real product-specific catalogs (Straumann BLT, Nobel Replace, MIS V3,
+ * etc.) come in Phase 3.4.1 as a per-clinic settings table. For now we
+ * use a generic set covering the standard diameter × length matrix.
+ */
+const IMPLANT_CATALOG = [
+  { label: 'Narrow  · 3.3 × 10', diameterMM: 3.3, lengthMM: 10 },
+  { label: 'Narrow  · 3.3 × 12', diameterMM: 3.3, lengthMM: 12 },
+  { label: 'Standard · 3.75 × 10', diameterMM: 3.75, lengthMM: 10 },
+  { label: 'Standard · 3.75 × 12', diameterMM: 3.75, lengthMM: 12 },
+  { label: 'Standard · 4.0 × 10', diameterMM: 4.0, lengthMM: 10 },
+  { label: 'Standard · 4.0 × 12', diameterMM: 4.0, lengthMM: 12 },
+  { label: 'Wide    · 4.8 × 8',  diameterMM: 4.8, lengthMM: 8 },
+  { label: 'Wide    · 4.8 × 10', diameterMM: 4.8, lengthMM: 10 },
+  { label: 'Wide    · 5.0 × 8',  diameterMM: 5.0, lengthMM: 8 },
+];
+
+/**
+ * Compute the minimum distance from a 3D line segment (a..b) to a
+ * polyline (the nerve canal). Returns the smallest perpendicular
+ * distance from any point on a..b to any segment of the polyline.
+ * Used for implant-vs-nerve safety check.
+ */
+function segmentToPolylineDistance(a, b, polyline) {
+  if (!Array.isArray(polyline) || polyline.length < 2) return Infinity;
+  let min = Infinity;
+  // For each segment in the polyline, compute the closest distance
+  // between the implant axis and that segment.
+  for (let i = 0; i < polyline.length - 1; i++) {
+    const d = segmentToSegmentDistance(a, b, polyline[i], polyline[i + 1]);
+    if (d < min) min = d;
+  }
+  return min;
+}
+
+/**
+ * 3D segment-to-segment minimum distance — based on the standard
+ * "Real-Time Collision Detection" algorithm by Christer Ericson.
+ */
+function segmentToSegmentDistance(p1, q1, p2, q2) {
+  const d1 = sub(q1, p1);
+  const d2 = sub(q2, p2);
+  const r  = sub(p1, p2);
+  const a = dot(d1, d1);
+  const e = dot(d2, d2);
+  const f = dot(d2, r);
+  let s, t;
+  const EPS = 1e-9;
+  if (a <= EPS && e <= EPS) return len(sub(p1, p2));
+  if (a <= EPS) { s = 0; t = clamp01(f / e); }
+  else {
+    const c = dot(d1, r);
+    if (e <= EPS) { t = 0; s = clamp01(-c / a); }
+    else {
+      const b = dot(d1, d2);
+      const denom = a * e - b * b;
+      s = denom !== 0 ? clamp01((b * f - c * e) / denom) : 0;
+      t = (b * s + f) / e;
+      if (t < 0) { t = 0; s = clamp01(-c / a); }
+      else if (t > 1) { t = 1; s = clamp01((b - c) / a); }
+    }
+  }
+  const c1 = add(p1, scale(d1, s));
+  const c2 = add(p2, scale(d2, t));
+  return len(sub(c1, c2));
+}
+
+const sub   = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const add   = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const scale = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const dot   = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const len   = (a) => Math.sqrt(dot(a, a));
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+
+/**
  * View modes — each maps to a different layout + viewport configuration
  * over the SAME underlying volume. Switching modes doesn't reload the
  * volume; it rebuilds viewports + tool group bindings.
@@ -686,6 +761,15 @@ export default function CBCTViewerPage() {
   const [tracingNerve, setTracingNerve]   = useState(false);
   const [safetyZoneMM, setSafetyZoneMM]   = useState(2);
 
+  // Phase 3.4 implant placement. implants is an array of:
+  //   { id, apex: [x,y,z], head: [x,y,z], diameterMM, lengthMM, label }
+  // placingImplant: when set to a catalog entry { diameterMM, lengthMM, label },
+  // the next two Shift+Clicks on MPR define apex then head.
+  const [implants, setImplants]                 = useState([]);
+  const [placingImplant, setPlacingImplant]     = useState(null);
+  const [pendingApex, setPendingApex]           = useState(null);
+  const [implantCatalogOpen, setImplantCatalogOpen] = useState(false);
+
   // Cached volume + last loaded volumeId, for fast view-mode rebuilds
   // without reloading the volume.
   const cachedVolumeRef = useRef(null);
@@ -1281,6 +1365,7 @@ export default function CBCTViewerPage() {
         archSlabMM: archSlabMM,
         nervePoints: nervePoints,
         safetyZoneMM: safetyZoneMM,
+        implants: implants,
       };
       const { error } = await supabase
         .from('imaging_studies')
@@ -1297,7 +1382,7 @@ export default function CBCTViewerPage() {
       console.warn('[cbct] save annotations failed:', e?.message);
       alert(`Save failed: ${e?.message || e}`);
     }
-  }, [studyId, archPoints, archSlabMM, nervePoints, safetyZoneMM]);
+  }, [studyId, archPoints, archSlabMM, nervePoints, safetyZoneMM, implants]);
 
   // Auto-load saved annotations once the viewer is ready (best-effort).
   useEffect(() => {
@@ -1349,6 +1434,11 @@ export default function CBCTViewerPage() {
         }
         const savedSafety = !Array.isArray(saved) ? saved.safetyZoneMM : null;
         if (typeof savedSafety === 'number') setSafetyZoneMM(savedSafety);
+        // Restore implants
+        const savedImplants = !Array.isArray(saved) ? (saved.implants || []) : [];
+        if (Array.isArray(savedImplants) && savedImplants.length > 0) {
+          setImplants(savedImplants);
+        }
         console.log(
           '[cbct] restored', annList.length, 'annotations,',
           savedArch.length, 'arch points,',
@@ -1520,6 +1610,54 @@ export default function CBCTViewerPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [stage]);
+
+  // ── Phase 3.4 Implant placement ────────────────────────────────────
+  // When placingImplant is set (catalog entry chosen), the next two
+  // Shift+Clicks on an MPR viewport define apex then head. After head,
+  // the implant is committed to `implants[]` and placingImplant resets.
+  useEffect(() => {
+    if (stage !== 'ready' || !placingImplant) return;
+    const engine = enginRef.current;
+    if (!engine) return;
+    const ids = (VIEW_MODES[viewMode]?.viewports || [])
+      .filter((v) => v.kind === 'orthographic')
+      .map((v) => v.id);
+    const cleanups = [];
+    for (const id of ids) {
+      const vp = engine.getViewport(id);
+      if (!vp?.element) continue;
+      const el = vp.element;
+      const onClick = (e) => {
+        if (e.button !== 0 || !e.shiftKey) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = el.getBoundingClientRect();
+        const world = vp.canvasToWorld([e.clientX - rect.left, e.clientY - rect.top]);
+        if (!world) return;
+        const pos = [world[0], world[1], world[2]];
+        if (!pendingApex) {
+          // First click — apex (deep end, in bone)
+          setPendingApex(pos);
+        } else {
+          // Second click — head (crestal end). Commit.
+          const newImplant = {
+            id: 'imp-' + Date.now().toString(36),
+            apex: pendingApex,
+            head: pos,
+            diameterMM: placingImplant.diameterMM,
+            lengthMM: placingImplant.lengthMM,
+            label: placingImplant.label,
+          };
+          setImplants((prev) => [...prev, newImplant]);
+          setPendingApex(null);
+          setPlacingImplant(null);
+        }
+      };
+      el.addEventListener('mousedown', onClick, { capture: true });
+      cleanups.push(() => el.removeEventListener('mousedown', onClick, { capture: true }));
+    }
+    return () => cleanups.forEach((fn) => fn());
+  }, [stage, placingImplant, pendingApex, viewMode]);
 
   // ── Phase 3.5 Nerve canal trace ────────────────────────────────────
   // When "Trace nerve" is enabled, Shift+Click on ANY MPR viewport
@@ -1861,6 +1999,79 @@ export default function CBCTViewerPage() {
                   <span className="font-mono text-amber-300">{a.display}</span>
                 </div>
               ))}
+            </div>
+
+            {/* Section: Implant placement */}
+            <SectionHeader>
+              Implants {implants.length > 0 && <span className="text-gray-500">({implants.length})</span>}
+            </SectionHeader>
+            <div className="space-y-1 mb-2">
+              <button
+                onClick={() => setImplantCatalogOpen((v) => !v)}
+                className={`w-full text-[10px] py-1.5 rounded flex items-center justify-center gap-1.5 ${
+                  placingImplant ? 'bg-blue-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+              >
+                <Cylinder size={10} />
+                {placingImplant
+                  ? (pendingApex ? 'Click HEAD (crestal)' : 'Click APEX (deep)')
+                  : 'Place implant'}
+              </button>
+              {implantCatalogOpen && !placingImplant && (
+                <div
+                  className="rounded p-1 space-y-0.5 max-h-40 overflow-y-auto"
+                  style={{ backgroundColor: '#0b0d10', border: '1px solid #1d2128' }}
+                >
+                  {IMPLANT_CATALOG.map((cat) => (
+                    <button
+                      key={cat.label}
+                      onClick={() => {
+                        setPlacingImplant(cat);
+                        setImplantCatalogOpen(false);
+                        setPendingApex(null);
+                      }}
+                      className="w-full text-left text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-blue-700 text-gray-300 hover:text-white"
+                    >
+                      {cat.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {placingImplant && (
+                <button
+                  onClick={() => { setPlacingImplant(null); setPendingApex(null); }}
+                  className="w-full text-[10px] py-1 rounded bg-gray-800 hover:bg-red-700 text-gray-300 hover:text-white"
+                >Cancel placement</button>
+              )}
+              {implants.length > 0 && (
+                <>
+                  <div className="text-[10px] space-y-0.5 max-h-32 overflow-y-auto">
+                    {implants.map((imp) => {
+                      const nerveDistMM = nervePoints.length >= 2
+                        ? segmentToPolylineDistance(imp.apex, imp.head, nervePoints)
+                        : null;
+                      const tooClose = nerveDistMM != null && nerveDistMM < safetyZoneMM;
+                      return (
+                        <div
+                          key={imp.id}
+                          className="flex items-center justify-between bg-gray-900 rounded px-1.5 py-1"
+                        >
+                          <span className="text-gray-300">{imp.label}</span>
+                          {nerveDistMM != null && (
+                            <span className={`font-mono ${tooClose ? 'text-red-400' : 'text-green-400'}`}>
+                              {nerveDistMM.toFixed(1)}mm
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <button
+                    onClick={() => setImplants([])}
+                    className="w-full text-[10px] py-1 rounded bg-gray-800 hover:bg-red-700 text-gray-300 hover:text-white"
+                  >Clear all implants</button>
+                </>
+              )}
             </div>
 
             {/* Section: Nerve canal trace */}
@@ -2209,6 +2420,17 @@ export default function CBCTViewerPage() {
                     safetyZoneMM={safetyZoneMM}
                   />
                 )}
+                {/* Implant cylinder overlays */}
+                {cfg && cfg.kind === 'orthographic' && implants.length > 0 && (
+                  <ImplantOverlay
+                    viewportId={cfg.id}
+                    engine={enginRef.current}
+                    implants={implants}
+                    pendingApex={pendingApex}
+                    nervePoints={nervePoints}
+                    safetyZoneMM={safetyZoneMM}
+                  />
+                )}
               </div>
             );
           })}
@@ -2484,6 +2706,114 @@ function NerveOverlay({ viewportId, engine, nervePoints, safetyZoneMM }) {
           />
         );
       })}
+    </svg>
+  );
+}
+
+/**
+ * Implant cylinder overlays for a single MPR viewport. Each implant
+ * has an apex (deep, in bone) and head (crestal, at the gum line);
+ * we draw the axis as a thick blue line and a circle at each end.
+ * Red if too close to the nerve safety zone, blue otherwise.
+ */
+function ImplantOverlay({ viewportId, engine, implants, pendingApex, nervePoints, safetyZoneMM }) {
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!engine) return;
+    const handler = (e) => {
+      if (e?.detail?.viewportId === viewportId) force((n) => n + 1);
+    };
+    cornerstone.eventTarget.addEventListener(
+      cornerstone.Enums.Events.CAMERA_MODIFIED, handler
+    );
+    return () => {
+      try {
+        cornerstone.eventTarget.removeEventListener(
+          cornerstone.Enums.Events.CAMERA_MODIFIED, handler
+        );
+      } catch {}
+    };
+  }, [engine, viewportId]);
+
+  if (!engine) return null;
+  const vp = engine.getViewport(viewportId);
+  if (!vp || !vp.element) return null;
+  const rect = vp.element.getBoundingClientRect();
+  const containerRect = vp.element.parentElement?.getBoundingClientRect();
+  if (!containerRect) return null;
+  const top = rect.top - containerRect.top;
+  const left = rect.left - containerRect.left;
+
+  // pixels-per-mm for diameter rendering
+  let pxPerMM = 1;
+  try {
+    const parallelScale = vp.getCamera?.()?.parallelScale;
+    if (parallelScale && rect.height) {
+      pxPerMM = (rect.height / 2) / parallelScale;
+    }
+  } catch {}
+
+  const project = (w) => {
+    try { return vp.worldToCanvas(w); } catch { return null; }
+  };
+
+  return (
+    <svg
+      className="absolute pointer-events-none"
+      style={{ top, left, width: rect.width, height: rect.height }}
+    >
+      {implants.map((imp) => {
+        const a = project(imp.apex);
+        const h = project(imp.head);
+        if (!a || !h) return null;
+        const tooClose = nervePoints.length >= 2 &&
+          segmentToPolylineDistance(imp.apex, imp.head, nervePoints) < safetyZoneMM;
+        const strokeColor = tooClose ? '#ef4444' : '#3b82f6';
+        const widthPx = Math.max(2, imp.diameterMM * pxPerMM);
+        return (
+          <g key={imp.id} opacity={0.85}>
+            {/* Cylinder body — thick translucent stroke at implant diameter */}
+            <line
+              x1={a[0]} y1={a[1]} x2={h[0]} y2={h[1]}
+              stroke={strokeColor}
+              strokeWidth={widthPx}
+              strokeLinecap="round"
+              opacity={0.25}
+            />
+            {/* Axis line */}
+            <line
+              x1={a[0]} y1={a[1]} x2={h[0]} y2={h[1]}
+              stroke={strokeColor}
+              strokeWidth={2}
+            />
+            {/* Apex (deep) — solid */}
+            <circle cx={a[0]} cy={a[1]} r={4} fill={strokeColor} stroke="#0b0d10" strokeWidth={1.2} />
+            {/* Head (crestal) — outlined */}
+            <circle cx={h[0]} cy={h[1]} r={5} fill="#0b0d10" stroke={strokeColor} strokeWidth={2} />
+            {/* Label */}
+            <text
+              x={(a[0] + h[0]) / 2 + 8}
+              y={(a[1] + h[1]) / 2}
+              fill={strokeColor}
+              fontSize={9}
+              fontFamily="monospace"
+            >
+              {imp.label}
+            </text>
+          </g>
+        );
+      })}
+      {/* Pending apex marker (between click 1 and click 2) */}
+      {pendingApex && (() => {
+        const p = project(pendingApex);
+        if (!p) return null;
+        return (
+          <g>
+            <circle cx={p[0]} cy={p[1]} r={6} fill="none" stroke="#3b82f6" strokeWidth={2} strokeDasharray="3 2" />
+            <text x={p[0] + 8} y={p[1]} fill="#3b82f6" fontSize={9} fontFamily="monospace">apex</text>
+          </g>
+        );
+      })()}
     </svg>
   );
 }

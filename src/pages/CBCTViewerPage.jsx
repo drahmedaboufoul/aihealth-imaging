@@ -2523,13 +2523,12 @@ function ArchOverlay({ viewportId, engine, archPoints }) {
   const offsetTop  = rect.top  - containerRect.top;
   const offsetLeft = rect.left - containerRect.left;
 
-  // Convert each world (x, y) point to canvas (x, y). We use the current
-  // axial Z by querying the focal point — but actually we just project
-  // through canvasToWorld inverse: we need worldToCanvas.
+  // Arch points are stored as 2D [x, y] on the axial plane the user
+  // clicked. We give them the CURRENT focal Z so projection works on
+  // axial. The PANO_AXIAL viewport (where this overlay is mounted) is
+  // always axial, so this gives the correct on-slice render.
   const project = (worldXY) => {
     try {
-      // worldToCanvas wants 3D — supply current focal Z so the projection
-      // works on the active axial plane.
       const camera = vp.getCamera();
       const z = camera?.focalPoint?.[2] ?? 0;
       return vp.worldToCanvas([worldXY[0], worldXY[1], z]);
@@ -2622,8 +2621,14 @@ function NerveOverlay({ viewportId, engine, nervePoints, safetyZoneMM }) {
   const top  = rect.top  - containerRect.top;
   const left = rect.left - containerRect.left;
 
-  // Signed distance from each nerve point to the current view plane,
-  // used for dimming. The view plane is defined by focal point + normal.
+  // CLINICAL VISIBILITY RULE: a 3D polyline (the nerve canal) should
+  // only appear on slices that actually intersect it within a small
+  // slab around the current slice plane. Showing all points always
+  // produces a confusing horizontal line on coronal/sagittal because
+  // points placed on a single axial slice all share the same Z.
+  //
+  // We compute signed distance from each point to the slice plane, and
+  // only render points + connecting segments within ±slabHalfMM mm.
   let viewPlaneNormal = [0, 0, 1];
   let viewFocal = [0, 0, 0];
   try {
@@ -2631,81 +2636,164 @@ function NerveOverlay({ viewportId, engine, nervePoints, safetyZoneMM }) {
     viewPlaneNormal = cam?.viewPlaneNormal || viewPlaneNormal;
     viewFocal       = cam?.focalPoint     || viewFocal;
   } catch {}
-  const distToPlane = (p) =>
+  const signedDist = (p) =>
     (p[0] - viewFocal[0]) * viewPlaneNormal[0] +
     (p[1] - viewFocal[1]) * viewPlaneNormal[1] +
     (p[2] - viewFocal[2]) * viewPlaneNormal[2];
 
-  const projected = nervePoints
-    .map((p) => {
-      try {
-        const c = vp.worldToCanvas(p);
-        return c ? { canvas: c, distMM: Math.abs(distToPlane(p)) } : null;
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
-  if (projected.length < 2) return null;
+  // Half-thickness of the visibility slab. 2.5mm covers the typical
+  // mandibular canal diameter plus a margin so the nerve doesn't
+  // disappear when you scroll by one slice.
+  const slabHalfMM = 2.5;
 
-  // Polyline path
-  const pathD = 'M ' + projected.map(({ canvas: [x, y] }) => `${x.toFixed(1)} ${y.toFixed(1)}`).join(' L ');
+  // For each polyline segment, geometrically clip it to the slab.
+  // Returns array of {canvasStart, canvasEnd, fullyInside}.
+  const segments = [];
+  for (let i = 0; i < nervePoints.length - 1; i++) {
+    const p1 = nervePoints[i];
+    const p2 = nervePoints[i + 1];
+    const d1 = signedDist(p1);
+    const d2 = signedDist(p2);
+    const in1 = Math.abs(d1) <= slabHalfMM;
+    const in2 = Math.abs(d2) <= slabHalfMM;
+    // Both outside on same side → skip
+    if (!in1 && !in2 && Math.sign(d1) === Math.sign(d2) && Math.abs(d1) > slabHalfMM && Math.abs(d2) > slabHalfMM) {
+      continue;
+    }
+    // Compute the t parameters where the segment crosses ±slabHalfMM
+    let tStart = 0, tEnd = 1;
+    if (!in1) {
+      // p1 outside — find crossing into slab
+      const target = d1 > 0 ? slabHalfMM : -slabHalfMM;
+      tStart = (d1 - target) / (d1 - d2);
+    }
+    if (!in2) {
+      const target = d2 > 0 ? slabHalfMM : -slabHalfMM;
+      tEnd = (d1 - target) / (d1 - d2);
+    }
+    if (tEnd <= tStart) continue;
+    const lerp = (t) => [
+      p1[0] + (p2[0] - p1[0]) * t,
+      p1[1] + (p2[1] - p1[1]) * t,
+      p1[2] + (p2[2] - p1[2]) * t,
+    ];
+    const worldStart = lerp(tStart);
+    const worldEnd   = lerp(tEnd);
+    let cs, ce;
+    try {
+      cs = vp.worldToCanvas(worldStart);
+      ce = vp.worldToCanvas(worldEnd);
+    } catch {
+      continue;
+    }
+    if (cs && ce) segments.push({ start: cs, end: ce });
+  }
+
+  // Project the control points that ARE inside the slab for the dots.
+  const visibleDots = [];
+  for (let i = 0; i < nervePoints.length; i++) {
+    if (Math.abs(signedDist(nervePoints[i])) > slabHalfMM) continue;
+    try {
+      const c = vp.worldToCanvas(nervePoints[i]);
+      if (c) visibleDots.push({ canvas: c, idx: i });
+    } catch {}
+  }
+
+  // If nothing is in the slab, render a small "off-plane" indicator
+  // so the user knows the nerve exists but is above/below this slice.
+  if (segments.length === 0 && visibleDots.length === 0) {
+    // Find the closest nerve point and show a hint
+    let closest = null;
+    let closestDist = Infinity;
+    for (const p of nervePoints) {
+      const d = signedDist(p);
+      if (Math.abs(d) < closestDist) {
+        closest = p;
+        closestDist = Math.abs(d);
+      }
+    }
+    if (!closest) return null;
+    let canvas;
+    try { canvas = vp.worldToCanvas(closest); } catch {}
+    if (!canvas) return null;
+    const direction = signedDist(closest) > 0 ? '↑' : '↓';
+    return (
+      <svg
+        className="absolute pointer-events-none"
+        style={{ top, left, width: rect.width, height: rect.height }}
+      >
+        <text
+          x={canvas[0]}
+          y={canvas[1]}
+          fill="#22c55e"
+          fontSize={10}
+          fontFamily="monospace"
+          opacity={0.5}
+          textAnchor="middle"
+        >
+          nerve {direction} {Math.abs(closestDist).toFixed(0)}mm
+        </text>
+      </svg>
+    );
+  }
 
   // Estimate pixels-per-mm from the camera so we can render the safety
   // tube radius accurately on this viewport.
   let pxPerMM = 1;
   try {
-    const dim = vp.getImageData?.()?.dimensions;
-    const spacing = vp.getImageData?.()?.spacing;
     const parallelScale = vp.getCamera?.()?.parallelScale;
     if (parallelScale && rect.height) {
-      // parallelScale is the half-height of the viewport in world mm.
       pxPerMM = (rect.height / 2) / parallelScale;
     }
   } catch {}
   const safetyPx = Math.max(1, safetyZoneMM * pxPerMM);
+
+  // Build a path string from the clipped segments.
+  const pathD = segments
+    .map((s) => `M ${s.start[0].toFixed(1)} ${s.start[1].toFixed(1)} L ${s.end[0].toFixed(1)} ${s.end[1].toFixed(1)}`)
+    .join(' ');
 
   return (
     <svg
       className="absolute pointer-events-none"
       style={{ top, left, width: rect.width, height: rect.height }}
     >
-      {/* Safety-zone halo — drawn thicker, lower opacity, beneath line */}
-      <path
-        d={pathD}
-        fill="none"
-        stroke="#22c55e"
-        strokeWidth={safetyPx * 2}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        opacity={0.2}
-      />
+      {/* Safety-zone halo (thicker, translucent, sits under the line) */}
+      {pathD && (
+        <path
+          d={pathD}
+          fill="none"
+          stroke="#22c55e"
+          strokeWidth={safetyPx * 2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          opacity={0.18}
+        />
+      )}
       {/* Nerve canal centerline */}
-      <path
-        d={pathD}
-        fill="none"
-        stroke="#22c55e"
-        strokeWidth={2}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        opacity={0.95}
-      />
-      {/* Control points — opacity scaled by distance from view plane */}
-      {projected.map(({ canvas: [x, y], distMM }, i) => {
-        const op = Math.max(0.15, 1 - distMM / 30);
-        return (
-          <circle
-            key={i}
-            cx={x}
-            cy={y}
-            r={4}
-            fill="#22c55e"
-            stroke="#0b0d10"
-            strokeWidth={1.5}
-            opacity={op}
-          />
-        );
-      })}
+      {pathD && (
+        <path
+          d={pathD}
+          fill="none"
+          stroke="#22c55e"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          opacity={0.95}
+        />
+      )}
+      {/* In-slab control points */}
+      {visibleDots.map(({ canvas: [x, y], idx }) => (
+        <circle
+          key={idx}
+          cx={x}
+          cy={y}
+          r={4}
+          fill="#22c55e"
+          stroke="#0b0d10"
+          strokeWidth={1.5}
+        />
+      ))}
     </svg>
   );
 }

@@ -734,9 +734,12 @@ export default function CBCTViewerPage() {
   // Each entry: { uid, toolName, displayText, viewportId }
   const [annotations, setAnnotations] = useState([]);
 
-  // AI segmentation modal — Phase 4 stub. Shows planned features and a
-  // status indicator so the user (and we) can see the roadmap.
+  // AI segmentation modal — Phase 4. Each feature can be triggered
+  // individually; results either populate viewer state (e.g. nerve
+  // polyline → nervePoints) or queue for later display.
   const [showAiModal, setShowAiModal] = useState(false);
+  const [aiRunning, setAiRunning] = useState({}); // { 'nerve-canal': true }
+  const [aiLastRun, setAiLastRun] = useState({}); // { 'nerve-canal': { ts, result } }
 
   // Phase 3.6.2 — "Promote to Treatment Plan" dialog state.
   // When the user has placed implants, they can promote the planning
@@ -1356,6 +1359,42 @@ export default function CBCTViewerPage() {
   // .state.getAllAnnotations() returns — we don't transform it, so a
   // future viewer can rehydrate exactly. RLS is already in place on
   // imaging_studies so this respects clinic scoping.
+  // Run an AI inference model on this study. The viewer doesn't call
+  // the inference service directly (internal-key never leaves server);
+  // it POSTs to the EMR's /api/ai-infer route which forwards.
+  const runAiInference = useCallback(async (modelKey) => {
+    if (!studyId) return;
+    setAiRunning((r) => ({ ...r, [modelKey]: true }));
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const emrBase = import.meta.env.VITE_EMR_BASE_URL || 'https://aihealthmc.ae';
+      const resp = await fetch(`${emrBase}/api/ai-infer`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${session?.access_token || ''}`,
+        },
+        body: JSON.stringify({ study_id: studyId, model: modelKey }),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(body?.error || resp.statusText);
+      setAiLastRun((r) => ({ ...r, [modelKey]: { ts: Date.now(), result: body } }));
+
+      // Auto-apply results that map to existing viewer state
+      if (modelKey === 'nerve-canal' && Array.isArray(body.polyline) && body.polyline.length >= 2) {
+        if (window.confirm(`AI suggested ${body.polyline.length} nerve-canal points (state: ${body.model_state}). Replace existing trace?`)) {
+          setNervePoints(body.polyline);
+          if (typeof body.safety_zone_mm === 'number') setSafetyZoneMM(body.safety_zone_mm);
+        }
+      }
+    } catch (e) {
+      console.error('[cbct] AI infer failed:', e);
+      alert(`AI inference failed: ${e?.message || e}`);
+    } finally {
+      setAiRunning((r) => ({ ...r, [modelKey]: false }));
+    }
+  }, [studyId]);
+
   // Promote the current implant plan into a formal treatment_plans row
   // in the EMR. Looks up the study's patient + clinic, generates a
   // treatment_items array from the placed implants, and inserts the
@@ -2665,12 +2704,33 @@ export default function CBCTViewerPage() {
               the inference service alongside the converter.
             </p>
             <div className="space-y-2 text-xs">
-              <AiFeature label="Tooth segmentation"          status="planned" desc="Per-tooth labels (FDI / Universal numbering)" />
-              <AiFeature label="Mandibular nerve canal"      status="planned" desc="IAN trace with 5mm safety zone overlay" />
+              <AiFeature
+                label="Mandibular nerve canal"
+                status="placeholder"
+                desc="IAN trace with safety zone — placeholder returns synthetic polyline; real nnU-Net model lands v0.2."
+                onRun={() => runAiInference('nerve-canal')}
+                running={!!aiRunning['nerve-canal']}
+                lastRun={aiLastRun['nerve-canal']}
+              />
+              <AiFeature
+                label="Tooth segmentation"
+                status="placeholder"
+                desc="Per-tooth labels (FDI). Placeholder returns empty list; real model = ToothFairy3."
+                onRun={() => runAiInference('teeth-segment')}
+                running={!!aiRunning['teeth-segment']}
+                lastRun={aiLastRun['teeth-segment']}
+              />
+              <AiFeature
+                label="Cephalometric landmarks"
+                status="placeholder"
+                desc="19 standard landmarks (Sella, Nasion, etc.) on lateral MIP."
+                onRun={() => runAiInference('landmarks-ceph')}
+                running={!!aiRunning['landmarks-ceph']}
+                lastRun={aiLastRun['landmarks-ceph']}
+              />
               <AiFeature label="Sinus segmentation"          status="planned" desc="Maxillary sinus boundary for sinus-lift planning" />
               <AiFeature label="Caries detection"            status="planned" desc="Per-tooth caries flag with confidence score" />
               <AiFeature label="Periapical lesion detection" status="planned" desc="Auto-flagged radiolucent lesions" />
-              <AiFeature label="Cephalometric landmarks"     status="planned" desc="Auto-place 19 standard landmarks (Sella, Nasion, etc.)" />
               <AiFeature label="Implant suggestion"          status="planned" desc="AI proposes implant positions with collision warnings" />
               <AiFeature label="IOS-CBCT registration"       status="planned" desc="Align intraoral scan to CBCT for unified planning" />
             </div>
@@ -3161,21 +3221,39 @@ function ImplantOverlay({ viewportId, engine, implants, pendingApex, nervePoints
  * Single row in the AI roadmap modal. Status pill colour-codes whether
  * the feature is planned, training, or live.
  */
-function AiFeature({ label, status, desc }) {
+function AiFeature({ label, status, desc, onRun, running, lastRun }) {
   const colors = {
-    planned:  'bg-gray-800 text-gray-400',
-    training: 'bg-amber-900 text-amber-300',
-    live:     'bg-green-900 text-green-300',
+    planned:     'bg-gray-800 text-gray-400',
+    placeholder: 'bg-purple-900 text-purple-300',
+    training:    'bg-amber-900 text-amber-300',
+    live:        'bg-green-900 text-green-300',
   };
+  const canRun = (status === 'placeholder' || status === 'live') && typeof onRun === 'function';
   return (
     <div className="flex items-start justify-between gap-3">
-      <div>
+      <div className="flex-1">
         <div className="text-gray-200">{label}</div>
         <div className="text-gray-500 text-[10px] mt-0.5">{desc}</div>
+        {lastRun && (
+          <div className="text-purple-300 text-[9px] mt-0.5 font-mono">
+            ran {new Date(lastRun.ts).toLocaleTimeString()} · {lastRun.result?.model_state || 'placeholder'}
+          </div>
+        )}
       </div>
-      <span className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 ${colors[status]}`}>
-        {status}
-      </span>
+      <div className="flex flex-col items-end gap-1 shrink-0">
+        <span className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded ${colors[status] || colors.planned}`}>
+          {status}
+        </span>
+        {canRun && (
+          <button
+            onClick={onRun}
+            disabled={running}
+            className="text-[10px] px-2 py-0.5 rounded bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white"
+          >
+            {running ? 'Running…' : 'Run'}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

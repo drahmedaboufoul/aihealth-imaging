@@ -35,7 +35,7 @@ import {
 } from 'lucide-react';
 import { resolveStudyDicomFiles, resolveStudyNiftiVolume } from '../lib/signedUrl';
 import { loadNiftiVolume } from '../lib/niftiLoader';
-import { renderArchPano, getVolumeScalarData, densifyArch } from '../lib/archPano';
+import { renderArchPano, renderCrossSection, getVolumeScalarData, densifyArch } from '../lib/archPano';
 import {
   initCornerstone,
   imageIdFromSignedUrl,
@@ -122,14 +122,9 @@ const VIEW_MODES = {
   'crosssec': {
     name: 'Cross-sections',
     ready: true,
-    layout: 'grid-2x2',
-    description: 'Cross-sections perpendicular to arch. Current: 4 slabbed coronals at fixed depths. v2: arch-curve sampling.',
-    viewports: [
-      { id: 'XS_1', label: 'Anterior',  orientationKey: 'CORONAL', color: '#10b981', kind: 'orthographic', slabMM: 2, blendMode: 'MIP' },
-      { id: 'XS_2', label: 'Premolar',  orientationKey: 'CORONAL', color: '#3b82f6', kind: 'orthographic', slabMM: 2, blendMode: 'MIP' },
-      { id: 'XS_3', label: 'Molar',     orientationKey: 'CORONAL', color: '#f59e0b', kind: 'orthographic', slabMM: 2, blendMode: 'MIP' },
-      { id: 'XS_4', label: 'Posterior', orientationKey: 'CORONAL', color: '#ef4444', kind: 'orthographic', slabMM: 2, blendMode: 'MIP' },
-    ],
+    layout: 'arch-crosssec',
+    description: 'Perpendicular cross-sections sampled along the arch curve. Trace the arch in Pano view first; this generates 16 thin slices at uniform spacing along the curve.',
+    viewports: [], // no Cornerstone viewports — pure canvas grid
   },
   'implant': {
     name: 'Implant',
@@ -673,6 +668,13 @@ export default function CBCTViewerPage() {
   const [archPoints, setArchPoints]   = useState([]);
   const [archSlabMM, setArchSlabMM]   = useState(8); // perp slab thickness mm
   const panoCanvasRef                 = useRef(null);
+
+  // Phase 3.3 cross-sections — N thin slices perpendicular to the arch
+  // curve at uniform arc-length spacing. Each is rendered into its own
+  // <canvas>; the refs are collected lazily.
+  const CROSSSEC_COUNT = 16;
+  const [xsWidthMM, setXsWidthMM] = useState(25);
+  const xsCanvasRefs = useRef([]);
 
   // Cached volume + last loaded volumeId, for fast view-mode rebuilds
   // without reloading the volume.
@@ -1249,8 +1251,6 @@ export default function CBCTViewerPage() {
     if (!studyId) return;
     try {
       const all = cornerstoneTools.annotation?.state?.getAllAnnotations?.() || [];
-      // Strip transient fields that don't survive a JSON round-trip
-      // (e.g., element references). Keep the parts a future viewer needs.
       const serialized = all.map((a) => ({
         annotationUID: a.annotationUID,
         metadata: a.metadata,
@@ -1260,23 +1260,32 @@ export default function CBCTViewerPage() {
           cachedStats: a.data?.cachedStats,
         },
       }));
+      // viewer_annotations is now an OBJECT (was an array). Includes
+      // both Cornerstone annotations AND viewer-specific state like the
+      // arch curve points. Backward-compat load below handles legacy
+      // array shape.
+      const payload = {
+        version: 2,
+        annotations: serialized,
+        archPoints: archPoints,
+        archSlabMM: archSlabMM,
+      };
       const { error } = await supabase
         .from('imaging_studies')
         .update({
-          viewer_annotations: serialized,
+          viewer_annotations: payload,
           viewer_annotations_updated_at: new Date().toISOString(),
         })
         .eq('id', studyId);
       if (error) throw error;
-      console.log('[cbct] saved', serialized.length, 'annotations');
-      // Lightweight UX feedback — flash the button via state we already have
-      setProbeReadout({ savedAt: Date.now(), count: serialized.length });
+      console.log('[cbct] saved', serialized.length, 'annotations +', archPoints.length, 'arch points');
+      setProbeReadout({ savedAt: Date.now(), count: serialized.length + archPoints.length });
       setTimeout(() => setProbeReadout(null), 2000);
     } catch (e) {
       console.warn('[cbct] save annotations failed:', e?.message);
       alert(`Save failed: ${e?.message || e}`);
     }
-  }, [studyId]);
+  }, [studyId, archPoints, archSlabMM]);
 
   // Auto-load saved annotations once the viewer is ready (best-effort).
   useEffect(() => {
@@ -1291,25 +1300,37 @@ export default function CBCTViewerPage() {
           .maybeSingle();
         if (cancelled) return;
         const saved = data?.viewer_annotations;
-        if (Array.isArray(saved) && saved.length > 0) {
-          // Re-add each annotation via the cornerstone state API. Each
-          // entry needs a frameOfReferenceUID to attach to a viewport
-          // group — we use the first MPR viewport's FoR.
+        if (!saved) return;
+        // Two shapes supported:
+        //   v1 (legacy): array of annotations
+        //   v2: { version: 2, annotations: [...], archPoints: [...], archSlabMM }
+        const annList = Array.isArray(saved) ? saved : (saved.annotations || []);
+        const savedArch = !Array.isArray(saved) ? (saved.archPoints || []) : [];
+        const savedSlab = !Array.isArray(saved) ? saved.archSlabMM : null;
+
+        // Restore cornerstone annotations
+        if (annList.length > 0) {
           const engine = enginRef.current;
           const vp = engine?.getViewport(MPR_VIEWPORT_IDS[0]);
           const FrameOfReferenceUID = vp?.getFrameOfReferenceUID?.();
-          if (!FrameOfReferenceUID) return;
-          for (const a of saved) {
-            try {
-              cornerstoneTools.annotation?.state?.addAnnotation?.(
-                { ...a, metadata: { ...a.metadata, FrameOfReferenceUID } },
-                FrameOfReferenceUID
-              );
-            } catch {}
+          if (FrameOfReferenceUID) {
+            for (const a of annList) {
+              try {
+                cornerstoneTools.annotation?.state?.addAnnotation?.(
+                  { ...a, metadata: { ...a.metadata, FrameOfReferenceUID } },
+                  FrameOfReferenceUID
+                );
+              } catch {}
+            }
+            engine?.render();
           }
-          engine?.render();
-          console.log('[cbct] restored', saved.length, 'saved annotations');
         }
+        // Restore arch curve
+        if (Array.isArray(savedArch) && savedArch.length >= 2) {
+          setArchPoints(savedArch);
+        }
+        if (typeof savedSlab === 'number') setArchSlabMM(savedSlab);
+        console.log('[cbct] restored', annList.length, 'annotations,', savedArch.length, 'arch points');
       } catch (e) {
         console.warn('[cbct] load annotations failed:', e?.message);
       }
@@ -1518,6 +1539,42 @@ export default function CBCTViewerPage() {
     el.addEventListener('mousedown', onClick, { capture: true });
     return () => el.removeEventListener('mousedown', onClick, { capture: true });
   }, [stage, viewMode]);
+
+  // Render the 16 cross-section canvases whenever points / VOI change
+  // and viewMode is 'crosssec'.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    if (viewMode !== 'crosssec') return;
+    const volume = cachedVolumeRef.current;
+    if (!volume || archPoints.length < 3) return;
+    const scalarData = getVolumeScalarData(volume);
+    if (!scalarData) return;
+    const preset = presetTable.find((p) => p.name === activePreset) || presetTable[0];
+    const voi = preset
+      ? { lower: preset.wc - preset.ww / 2, upper: preset.wc + preset.ww / 2 }
+      : { lower: -1000, upper: 3000 };
+    const dimensions = Array.isArray(volume.dimensions) ? volume.dimensions : volume.imageData.getDimensions();
+    const spacing    = Array.isArray(volume.spacing)    ? volume.spacing    : volume.imageData.getSpacing();
+    const origin     = Array.isArray(volume.origin)     ? volume.origin     : volume.imageData.getOrigin();
+    // Densify the arch to N samples — we want one cross-section per sample
+    const samples = densifyArch(archPoints, CROSSSEC_COUNT);
+    for (let i = 0; i < CROSSSEC_COUNT; i++) {
+      const canvas = xsCanvasRefs.current[i];
+      const sample = samples[i];
+      if (!canvas || !sample) continue;
+      renderCrossSection(canvas, {
+        scalarData,
+        dimensions, spacing, origin,
+        sample,
+        widthMM: xsWidthMM,
+        tangentSlabMM: 1,
+        voi,
+        outW: 200,
+        outH: 300,
+        flipZ: true,
+      });
+    }
+  }, [stage, viewMode, archPoints, xsWidthMM, activePreset, presetTable]);
 
   // Render the pano canvas whenever points / VOI / slab changes.
   useEffect(() => {
@@ -1916,8 +1973,78 @@ export default function CBCTViewerPage() {
           </div>
         )}
 
-        {/* Standard view layouts (everything except arch-pano) */}
-        {(viewMode !== 'pano' || !VIEW_MODES.pano.ready) && (
+        {/* Cross-sections layout: 4×4 grid of perpendicular slices */}
+        {viewMode === 'crosssec' && VIEW_MODES.crosssec.ready && (
+          <div className="h-full w-full overflow-auto p-2" style={{ backgroundColor: '#1d2128' }}>
+            {archPoints.length < 3 ? (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center max-w-md px-4">
+                  <div className="text-amber-500 text-xs uppercase tracking-wider mb-2">Trace the arch first</div>
+                  <p className="text-gray-400 text-xs leading-relaxed">
+                    Cross-sections sample perpendicular to the arch curve. Go to <b>Pano</b> view first
+                    and Shift+Click ≥3 points along the dental arch, then come back here.
+                  </p>
+                  <button
+                    onClick={() => switchViewMode('pano')}
+                    className="mt-4 text-xs px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white"
+                  >
+                    Go to Pano view
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* Floating settings card */}
+                <div
+                  className="absolute top-3 right-3 rounded-lg p-2.5 text-xs space-y-1.5 z-10"
+                  style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128', width: 200 }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-gray-400 text-[10px]">XS width mm</span>
+                    <input
+                      type="range"
+                      min={15}
+                      max={50}
+                      step={1}
+                      value={xsWidthMM}
+                      onChange={(e) => setXsWidthMM(Number(e.target.value))}
+                      className="flex-1 accent-amber-600"
+                    />
+                    <span className="font-mono text-[10px] text-amber-300 w-6 text-right">{xsWidthMM}</span>
+                  </div>
+                  <p className="text-[10px] text-gray-500 leading-tight">
+                    {CROSSSEC_COUNT} cross-sections evenly spaced along the arch curve.
+                  </p>
+                </div>
+                {/* Grid */}
+                <div className="grid grid-cols-4 gap-1.5">
+                  {Array.from({ length: CROSSSEC_COUNT }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="relative rounded overflow-hidden"
+                      style={{ backgroundColor: SHELL_BG, border: '1px solid #1d2128' }}
+                    >
+                      <canvas
+                        ref={(el) => { xsCanvasRefs.current[i] = el; }}
+                        className="w-full block"
+                        style={{ imageRendering: 'pixelated', aspectRatio: '2 / 3' }}
+                      />
+                      <div
+                        className="absolute top-1 left-1 text-[9px] font-mono px-1 py-0.5 rounded pointer-events-none"
+                        style={{ backgroundColor: 'rgba(11,13,16,0.7)', color: '#f59e0b' }}
+                      >
+                        {i + 1}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Standard view layouts (everything except arch-pano and arch-crosssec) */}
+        {(viewMode !== 'pano' && viewMode !== 'crosssec') && (
         <div
           className={
             VIEW_MODES[viewMode]?.layout === 'side-by-side'

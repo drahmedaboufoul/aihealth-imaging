@@ -245,6 +245,105 @@ export function renderArchPano(canvas, opts) {
 }
 
 /**
+ * Render a single cross-section perpendicular to the arch curve.
+ *
+ * The cross-section is the radiologic standard view for implant
+ * planning: it shows a thin coronal-like slice perpendicular to the
+ * arch at one specific point along it, revealing buccal/lingual bone
+ * width and crestal bone height to the inferior alveolar nerve.
+ *
+ * @param {HTMLCanvasElement|OffscreenCanvas} canvas
+ * @param {object} opts
+ *   @param {Float32Array} opts.scalarData
+ *   @param {[number,number,number]} opts.dimensions
+ *   @param {[number,number,number]} opts.spacing
+ *   @param {[number,number,number]} opts.origin
+ *   @param {{x,y,nx,ny}} opts.sample  - one densifyArch() entry
+ *   @param {number} opts.widthMM      - cross-section width (default 30mm)
+ *   @param {number} opts.tangentSlabMM- thickness along the arch tangent
+ *                                       (default 1mm — thin slice)
+ *   @param {{lower,upper}} opts.voi
+ *   @param {number} opts.outW
+ *   @param {number} opts.outH
+ *   @param {boolean} opts.flipZ
+ */
+export function renderCrossSection(canvas, opts) {
+  const {
+    scalarData,
+    dimensions, spacing, origin,
+    sample,
+    widthMM = 30,
+    tangentSlabMM = 1,
+    voi,
+    outW = 200,
+    outH = 300,
+    flipZ = true,
+  } = opts;
+  const [dx, dy, dz] = dimensions;
+  const [sx, sy, sz] = spacing;
+  const [ox, oy, oz] = origin;
+
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d');
+  const imageData = ctx.createImageData(outW, outH);
+  const buf = imageData.data;
+
+  const voiLo = voi?.lower ?? -1000;
+  const voiHi = voi?.upper ?? 3000;
+  const voiSpan = Math.max(1, voiHi - voiLo);
+
+  // Tangent-direction slab (averaged over a thin slice along the curve)
+  const tangentStepMM = Math.max(sx, sy);
+  const tSteps = Math.max(1, Math.round(tangentSlabMM / tangentStepMM));
+  const tOffsets = [];
+  for (let s = 0; s < tSteps; s++) {
+    const offsetMM = -tangentSlabMM / 2 + (s + 0.5) * (tangentSlabMM / tSteps);
+    tOffsets.push(offsetMM);
+  }
+
+  for (let col = 0; col < outW; col++) {
+    // perpendicular distance from arch curve, -widthMM/2 .. +widthMM/2
+    const perpMM = (col / (outW - 1) - 0.5) * widthMM;
+    for (let row = 0; row < outH; row++) {
+      const zFrac = flipZ ? 1 - row / (outH - 1) : row / (outH - 1);
+      const iz = Math.round(zFrac * (dz - 1));
+      if (iz < 0 || iz >= dz) continue;
+
+      let maxVal = -Infinity;
+      // We average along tangent (thin slab) — sum then divide (mean)
+      // is more representative for cross-sections than MIP.
+      let sum = 0; let n = 0;
+      for (let k = 0; k < tOffsets.length; k++) {
+        const tMM = tOffsets[k];
+        const wx = sample.x + sample.nx * perpMM + sample.tx * tMM;
+        const wy = sample.y + sample.ny * perpMM + sample.ty * tMM;
+        const ix = Math.round((wx - ox) / sx);
+        const iy = Math.round((wy - oy) / sy);
+        if (ix < 0 || ix >= dx || iy < 0 || iy >= dy) continue;
+        const idx = iz * dx * dy + iy * dx + ix;
+        const v = scalarData[idx];
+        sum += v; n += 1;
+        if (v > maxVal) maxVal = v;
+      }
+
+      let gray;
+      if (n === 0) gray = 0;
+      else {
+        // Mean tangent-slab gives a smoother CT-like view of the
+        // perpendicular slice. (MIP available via maxVal if needed.)
+        const value = sum / n;
+        gray = ((value - voiLo) / voiSpan) * 255;
+        gray = Math.max(0, Math.min(255, gray));
+      }
+      const idx4 = (row * outW + col) * 4;
+      buf[idx4] = gray; buf[idx4 + 1] = gray; buf[idx4 + 2] = gray; buf[idx4 + 3] = 255;
+    }
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
+/**
  * Convenience: pull the scalar buffer from a Cornerstone3D volume in a
  * version-tolerant way. v4 has several access paths depending on whether
  * the volume was streamed or created locally.

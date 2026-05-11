@@ -241,12 +241,18 @@ const VIEW_MODES = {
  */
 function safeVolumeAttr(volume, key) {
   if (!volume) return null;
-  // Direct array
+  // Direct property — Cornerstone often stores these as plain Arrays
+  // BUT can return TypedArrays (Float64Array) under some build paths,
+  // and Array.isArray() is false for TypedArrays. Accept any array-like
+  // with length ≥ 3 and normalise to a plain 3-element Array so the
+  // downstream pano render's destructuring is safe.
   try {
     const v = volume[key];
-    if (Array.isArray(v) && v.length >= 3) return v;
+    if (v && typeof v.length === 'number' && v.length >= 3) {
+      return [Number(v[0]), Number(v[1]), Number(v[2])];
+    }
   } catch (_) {}
-  // vtk imageData methods
+  // vtk imageData methods (createLocalVolume always builds an imageData)
   const methodMap = {
     dimensions: 'getDimensions',
     spacing: 'getSpacing',
@@ -256,10 +262,19 @@ function safeVolumeAttr(volume, key) {
     const fn = volume.imageData?.[methodMap[key]];
     if (typeof fn === 'function') {
       const v = fn.call(volume.imageData);
-      if (Array.isArray(v) && v.length >= 3) return v;
-      // vtk sometimes returns Float64Array — convert
       if (v && typeof v.length === 'number' && v.length >= 3) {
-        return [v[0], v[1], v[2]];
+        return [Number(v[0]), Number(v[1]), Number(v[2])];
+      }
+    }
+  } catch (_) {}
+  // Last-ditch: some volumes expose getDimensions/getSpacing/getOrigin
+  // directly on the volume object.
+  try {
+    const directFn = volume[methodMap[key]];
+    if (typeof directFn === 'function') {
+      const v = directFn.call(volume);
+      if (v && typeof v.length === 'number' && v.length >= 3) {
+        return [Number(v[0]), Number(v[1]), Number(v[2])];
       }
     }
   } catch (_) {}
@@ -794,6 +809,10 @@ export default function CBCTViewerPage() {
   // re-renders whenever the points or VOI change.
   const [archPoints, setArchPoints]   = useState([]);
   const [archSlabMM, setArchSlabMM]   = useState(8); // perp slab thickness mm
+  // Surface render-side failures (null scalarData, missing geometry, etc.)
+  // in the pano panel so the user sees *why* the right-hand image stays
+  // empty instead of staring at a black canvas with no feedback.
+  const [panoRenderError, setPanoRenderError] = useState(null);
   // Explicit "Trace Arch" tool — when true, ANY left-click on the axial
   // adds an arch point. When false, only Shift+Click adds points (legacy
   // shortcut). This makes the workflow discoverable instead of hidden
@@ -1975,15 +1994,30 @@ export default function CBCTViewerPage() {
     if (!canvas || !volume || archPoints.length < 3) return;
     try {
       const scalarData = getVolumeScalarData(volume);
+      // Diagnostic dump — surface volume shape on first render attempt so
+      // we can tell which code path is failing without the user needing
+      // to send a screenshot of the console.
+      console.log('[pano] render attempt', {
+        archPoints: archPoints.length,
+        scalarDataLen: scalarData?.length,
+        scalarDataType: scalarData?.constructor?.name,
+        volumeKeys: volume ? Object.keys(volume).slice(0, 20) : null,
+        hasImageData: !!volume.imageData,
+      });
       if (!scalarData) {
-        console.warn('[pano] volume scalarData not accessible — skipping render');
+        const msg = 'Volume scalar data not accessible (Cornerstone v4 API mismatch).';
+        console.warn('[pano]', msg);
+        setPanoRenderError(msg);
         return;
       }
       const dimensions = safeVolumeAttr(volume, 'dimensions');
       const spacing    = safeVolumeAttr(volume, 'spacing');
       const origin     = safeVolumeAttr(volume, 'origin');
+      console.log('[pano] geometry', { dimensions, spacing, origin });
       if (!dimensions || !spacing || !origin) {
-        console.warn('[pano] volume geometry missing — skipping render');
+        const msg = `Volume geometry missing (dimensions=${!!dimensions} spacing=${!!spacing} origin=${!!origin}).`;
+        console.warn('[pano]', msg);
+        setPanoRenderError(msg);
         return;
       }
       const preset = presetTable.find((p) => p.name === activePreset) || presetTable[0];
@@ -2000,8 +2034,11 @@ export default function CBCTViewerPage() {
         panoHeight: 400,
         flipZ: true,
       });
+      console.log('[pano] render OK', { w: canvas.width, h: canvas.height });
+      setPanoRenderError(null);
     } catch (e) {
       console.error('[pano] render crashed:', e);
+      setPanoRenderError(`Render crashed: ${e?.message || e}`);
     }
   }, [stage, viewMode, archPoints, archSlabMM, activePreset, presetTable]);
 
@@ -2537,6 +2574,23 @@ export default function CBCTViewerPage() {
                       Click <span className="text-purple-300 font-semibold">AI auto-trace</span> for
                       a one-click suggestion. You can refine the points after.
                     </p>
+                  </div>
+                </div>
+              )}
+              {archPoints.length >= 3 && panoRenderError && (
+                <div className="absolute inset-0 flex items-center justify-center p-4">
+                  <div
+                    className="max-w-md text-xs rounded p-3 border"
+                    style={{ backgroundColor: 'rgba(127,29,29,0.25)', borderColor: '#7f1d1d', color: '#fecaca' }}
+                  >
+                    <div className="font-semibold uppercase tracking-wider mb-1 text-red-300">
+                      Pano render failed
+                    </div>
+                    <div className="text-[11px] leading-relaxed">{panoRenderError}</div>
+                    <div className="mt-2 text-[10px] text-gray-400">
+                      Open the browser console — the line starting with <code>[pano] render attempt</code> shows
+                      which volume access path returned null. Share that line so we can patch the right fallback.
+                    </div>
                   </div>
                 </div>
               )}

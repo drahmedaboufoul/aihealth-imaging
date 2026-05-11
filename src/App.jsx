@@ -12,6 +12,8 @@ const IOSViewerPage = lazy(() => import('./pages/IOSViewerPage'));
 const DicomViewerPage = lazy(() => import('./pages/DicomViewerPage'));
 // CBCT viewer (volume rendering + MPR) — heaviest, lazy
 const CBCTViewerPage = lazy(() => import('./pages/CBCTViewerPage'));
+// Shared viewer — tokenized public access for external collaborators
+const SharedViewerPage = lazy(() => import('./pages/SharedViewerPage'));
 
 function ViewerLoader() {
   return (
@@ -53,6 +55,17 @@ export default function App() {
         element={
           <Suspense fallback={<ViewerLoader />}>
             <CBCTViewerPage />
+          </Suspense>
+        }
+      />
+
+      {/* Shared viewer (tokenized public access). No auth header
+          required — the token in the URL is the auth. */}
+      <Route
+        path="/viewer/share/:token"
+        element={
+          <Suspense fallback={<ViewerLoader />}>
+            <SharedViewerPage />
           </Suspense>
         }
       />

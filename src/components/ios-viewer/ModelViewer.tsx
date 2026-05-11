@@ -7,6 +7,7 @@ import { MultiMeshModel, type MeshFile } from './MultiMeshModel';
 import MeasureTool from './MeasureTool';
 import SceneEffects from './SceneEffects';
 import OcclusalContactMap from './OcclusalContactMap';
+import ToothPicker from './ToothPicker';
 import MeasurementOverlay from './components/MeasurementOverlay';
 import { useIOSViewerStore } from './store/iosViewerStore';
 import { Button } from '@/components/ui/button';
@@ -25,7 +26,8 @@ import {
   BarChart3,
   ChevronRight,
   ChevronLeft,
-  Monitor
+  Monitor,
+  Hash,
 } from 'lucide-react';
 
 interface ModelViewerProps {
@@ -633,6 +635,7 @@ export function ModelViewer({
   const tools = [
     { id: 'measure' as ToolType, icon: Ruler, label: 'Measurement' },
     { id: 'occlusal' as ToolType, icon: CircleDot, label: 'Occlusal Contact' },
+    { id: 'tooth-label' as ToolType, icon: Hash, label: 'FDI Tooth Label' },
     { id: 'analysis' as ToolType, icon: BarChart3, label: 'Analysis' },
   ];
 
@@ -806,6 +809,11 @@ export function ModelViewer({
                 red (touching), amber (near), green (no contact) based on
                 ray-down distance to the mandible. */}
             <OcclusalContactMap active={activeTool === 'occlusal' && !readOnly} />
+
+            {/* FDI tooth labeling — click any tooth, enter FDI number,
+                label pins to the mesh. Smart-suggests quadrant from the
+                clicked mesh's role + X coord. */}
+            <ToothPicker active={activeTool === 'tooth-label' && !readOnly} />
 
             {/* Wires the clipping plane + material UI to actual scene meshes. */}
             <SceneEffects />

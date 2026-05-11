@@ -37,7 +37,7 @@ export interface ViewerSettings {
   autoOrient?: boolean;
 }
 
-export type ToolType = 'none' | 'measure' | 'occlusal' | 'analysis';
+export type ToolType = 'none' | 'measure' | 'occlusal' | 'analysis' | 'tooth-label';
 
 export interface MouseSettings {
   leftRotation: boolean; // true = left rotates, false = right rotates

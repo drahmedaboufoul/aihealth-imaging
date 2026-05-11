@@ -6,7 +6,32 @@ import React, { useMemo } from 'react';
 import { Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { useIOSViewerStore } from '../store/iosViewerStore';
-import { Badge } from '@/components/ui/badge';
+
+// Minimal local Badge — the EMR's @/components/ui/badge isn't available
+// in the imaging-viewer repo. Same visual: amber pill for active, gray
+// for completed measurements.
+function Badge({ variant = 'secondary', className = '', children }) {
+  const bg = variant === 'default' ? '#f59e0b' : '#1f2937';
+  const fg = variant === 'default' ? '#0b0d10' : '#f3f4f6';
+  return (
+    <span
+      style={{
+        backgroundColor: bg,
+        color: fg,
+        padding: '2px 8px',
+        borderRadius: 12,
+        fontSize: 11,
+        fontWeight: 600,
+        fontFamily: 'monospace',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+        border: '1px solid rgba(255,255,255,0.1)',
+      }}
+      className={className}
+    >
+      {children}
+    </span>
+  );
+}
 
 // Line component for measurements
 const MeasurementLine = ({ start, end, color = '#ff0000' }) => {

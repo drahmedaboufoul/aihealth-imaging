@@ -4,6 +4,10 @@ import { OrbitControls, Grid, PerspectiveCamera, Line, Environment } from '@reac
 import * as THREE from 'three';
 import type { Patient, Scan, ViewerSettings, ToolType, MouseSettings } from './types';
 import { MultiMeshModel, type MeshFile } from './MultiMeshModel';
+import MeasureTool from './MeasureTool';
+import SceneEffects from './SceneEffects';
+import MeasurementOverlay from './components/MeasurementOverlay';
+import { useIOSViewerStore } from './store/iosViewerStore';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
@@ -588,10 +592,42 @@ export function ModelViewer({
     }
   };
 
+  // Real screenshot: pull the canvas pixel buffer via the WebGL renderer.
+  // Renders one frame on demand (preserveDrawingBuffer isn't on by default,
+  // so the buffer can be empty between paints), then exports as PNG.
   const handleScreenshot = () => {
-    // Screenshot functionality would be implemented here
-    alert('Screenshot captured!');
+    const canvas = document.querySelector('canvas') as HTMLCanvasElement | null;
+    if (!canvas) {
+      alert('No canvas found.');
+      return;
+    }
+    // Force a render so the framebuffer has fresh contents
+    try {
+      const event = new Event('resize');
+      window.dispatchEvent(event);
+    } catch {}
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        try {
+          const dataURL = canvas.toDataURL('image/png');
+          const a = document.createElement('a');
+          a.href = dataURL;
+          const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+          a.download = `ios-scan-${ts}.png`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        } catch (e) {
+          alert('Screenshot failed: ' + (e as Error).message);
+        }
+      });
+    });
   };
+
+  // Sub-tools for the active main tool (e.g. distance vs angle when
+  // 'measure' is active). Tracked separately so we don't need to extend
+  // the parent's activeTool enum.
+  const [measureSubTool, setMeasureSubTool] = useState<'distance' | 'angle'>('distance');
 
   const tools = [
     { id: 'measure' as ToolType, icon: Ruler, label: 'Measurement' },
@@ -646,9 +682,49 @@ export function ModelViewer({
           </div>
         )}
 
+        {/* Measure sub-tool picker (distance vs angle) — shown only when
+            Measurement tool is active. Sits next to the left toolbar. */}
+        {!readOnly && activeTool === 'measure' && (
+          <div className="absolute left-16 top-1/2 -translate-y-1/2 z-10 bg-white rounded-lg shadow-lg border border-gray-200 p-1 flex flex-col gap-1">
+            <div className="text-[9px] font-bold uppercase tracking-wider text-gray-500 px-2 pt-1">Measure</div>
+            <button
+              onClick={() => setMeasureSubTool('distance')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                measureSubTool === 'distance'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-700 hover:bg-gray-100'
+              }`}
+              title="Click two points to measure distance"
+            >
+              Distance
+            </button>
+            <button
+              onClick={() => setMeasureSubTool('angle')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                measureSubTool === 'angle'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-gray-700 hover:bg-gray-100'
+              }`}
+              title="Click three points: start, vertex, end"
+            >
+              Angle
+            </button>
+            <div className="text-[10px] text-gray-500 px-2 py-1 border-t border-gray-100 mt-1">
+              {measureSubTool === 'distance' ? 'Click 2 points' : 'Click 3 points (vertex 2nd)'}
+            </div>
+          </div>
+        )}
+
         {/* 3D Canvas */}
         <div className="flex-1 relative">
-          <Canvas shadows dpr={[1, 2]}>
+          {/* preserveDrawingBuffer lets us toDataURL() for screenshots
+              without re-rendering manually. Minor perf cost; worth it
+              for the clinical screenshot workflow. */}
+          <Canvas
+            shadows
+            dpr={[1, 2]}
+            gl={{ preserveDrawingBuffer: true, antialias: true, localClippingEnabled: true }}
+          >
             <PerspectiveCamera makeDefault position={[0, 0, 4]} fov={45} />
             <ambientLight intensity={0.45} />
             <directionalLight position={[5, 5, 5]} intensity={0.75} castShadow />
@@ -701,6 +777,18 @@ export function ModelViewer({
                   : (fileUrl || 'demo')
               }
             />
+
+            {/* Real measurement engine — raycast picking on click. */}
+            <MeasureTool
+              active={activeTool === 'measure' && !readOnly}
+              toolType={measureSubTool}
+            />
+
+            {/* Renders committed measurements (lines + labels) in 3D. */}
+            <MeasurementOverlay />
+
+            {/* Wires the clipping plane + material UI to actual scene meshes. */}
+            <SceneEffects />
 
             <OrbitControls
               ref={controlsRef}

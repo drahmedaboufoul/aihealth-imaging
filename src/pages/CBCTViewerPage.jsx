@@ -1431,11 +1431,11 @@ export default function CBCTViewerPage() {
     setAiRunning((r) => ({ ...r, [modelKey]: true }));
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      // The EMR's production URL on Vercel. Override in production by
-      // setting VITE_EMR_BASE_URL on the aihealth-imaging Vercel project
-      // (e.g., to a custom domain once aihealthmc.ae is pointed at Vercel).
-      const emrBase = import.meta.env.VITE_EMR_BASE_URL || 'https://aihealthmc.vercel.app';
-      const resp = await fetch(`${emrBase}/api/ai-infer`, {
+      // Same-origin call — /api/ai-infer is now hosted on the imaging
+      // project itself (the EMR project has Vercel SSO Deployment
+      // Protection enabled which 401'd cross-origin fetches at the edge
+      // before our handler could run).
+      const resp = await fetch(`/api/ai-infer`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -2554,11 +2554,21 @@ export default function CBCTViewerPage() {
               </div>
             </div>
             {/* Cell 2: pano canvas (custom render) */}
-            <div className="relative flex items-center justify-center" style={{ backgroundColor: SHELL_BG }}>
+            <div className="relative flex items-center justify-center overflow-hidden" style={{ backgroundColor: SHELL_BG }}>
+              {/*
+                The canvas backing buffer is 900×400 (set by renderArchPano).
+                Without an explicit display width/height, items-center +
+                justify-center will collapse it because max-w-full picks
+                its content-box width from a zero flex sibling and the
+                image renders into a 1px-wide strip.
+                width:100% + height:auto + object-fit:contain lets it
+                scale up to the full half-column while preserving the
+                pano's aspect ratio.
+              */}
               <canvas
                 ref={panoCanvasRef}
-                className="max-w-full max-h-full"
-                style={{ imageRendering: 'pixelated' }}
+                className="w-full h-full"
+                style={{ imageRendering: 'pixelated', objectFit: 'contain', maxWidth: '100%', maxHeight: '100%' }}
               />
               {archPoints.length < 3 && (
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none">

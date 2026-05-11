@@ -3,7 +3,7 @@
  * URL: /viewer/share/:token
  *
  * Flow:
- *   1. Resolve the token via the EMR's /api/imaging-share-resolve.
+ *   1. Resolve the token via the imaging project's own /api/imaging-share-resolve.
  *      Server validates expiry / revoke / view-count limits and
  *      returns study metadata + signed file URLs.
  *   2. Render the appropriate viewer (CBCT / IOS / DICOM) in
@@ -17,8 +17,6 @@ import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Loader2, AlertCircle, Lock, Download } from 'lucide-react';
 
-const EMR_BASE = import.meta.env.VITE_EMR_BASE_URL || 'https://aihealthmc.vercel.app';
-
 export default function SharedViewerPage() {
   const { token } = useParams();
   const navigate = useNavigate();
@@ -28,7 +26,9 @@ export default function SharedViewerPage() {
     if (!token) return;
     (async () => {
       try {
-        const resp = await fetch(`${EMR_BASE}/api/imaging-share-resolve`, {
+        // Same-origin: this API route now lives on the imaging
+        // Vercel project, not the EMR (the EMR is SSO-walled).
+        const resp = await fetch(`/api/imaging-share-resolve`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ token }),

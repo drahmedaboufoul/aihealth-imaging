@@ -229,6 +229,44 @@ const VIEW_MODES = {
 };
 
 /**
+ * Pull `dimensions`, `spacing`, or `origin` from a Cornerstone3D
+ * volume in a version-tolerant way. Returns null if every known path
+ * fails so callers can skip rendering instead of crashing.
+ *
+ * Across Cornerstone3D 4.x:
+ *   - Some volumes expose these as plain arrays on the volume
+ *   - Some require querying volume.imageData via vtk methods
+ *   - Local volumes (createLocalVolume) sometimes have the arrays
+ *     but not the imageData yet on first render
+ */
+function safeVolumeAttr(volume, key) {
+  if (!volume) return null;
+  // Direct array
+  try {
+    const v = volume[key];
+    if (Array.isArray(v) && v.length >= 3) return v;
+  } catch (_) {}
+  // vtk imageData methods
+  const methodMap = {
+    dimensions: 'getDimensions',
+    spacing: 'getSpacing',
+    origin: 'getOrigin',
+  };
+  try {
+    const fn = volume.imageData?.[methodMap[key]];
+    if (typeof fn === 'function') {
+      const v = fn.call(volume.imageData);
+      if (Array.isArray(v) && v.length >= 3) return v;
+      // vtk sometimes returns Float64Array — convert
+      if (v && typeof v.length === 'number' && v.length >= 3) {
+        return [v[0], v[1], v[2]];
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
  * Read the volume's actual scalar data range. Used to detect HU vs raw
  * pixel scaling and to compute auto-W/L. Samples sparsely so we don't
  * iterate 100M+ voxels on a typical CBCT.
@@ -1884,64 +1922,87 @@ export default function CBCTViewerPage() {
     if (viewMode !== 'crosssec') return;
     const volume = cachedVolumeRef.current;
     if (!volume || archPoints.length < 3) return;
-    const scalarData = getVolumeScalarData(volume);
-    if (!scalarData) return;
-    const preset = presetTable.find((p) => p.name === activePreset) || presetTable[0];
-    const voi = preset
-      ? { lower: preset.wc - preset.ww / 2, upper: preset.wc + preset.ww / 2 }
-      : { lower: -1000, upper: 3000 };
-    const dimensions = Array.isArray(volume.dimensions) ? volume.dimensions : volume.imageData.getDimensions();
-    const spacing    = Array.isArray(volume.spacing)    ? volume.spacing    : volume.imageData.getSpacing();
-    const origin     = Array.isArray(volume.origin)     ? volume.origin     : volume.imageData.getOrigin();
-    // Densify the arch to N samples — we want one cross-section per sample
-    const samples = densifyArch(archPoints, CROSSSEC_COUNT);
-    for (let i = 0; i < CROSSSEC_COUNT; i++) {
-      const canvas = xsCanvasRefs.current[i];
-      const sample = samples[i];
-      if (!canvas || !sample) continue;
-      renderCrossSection(canvas, {
-        scalarData,
-        dimensions, spacing, origin,
-        sample,
-        widthMM: xsWidthMM,
-        tangentSlabMM: 1,
-        voi,
-        outW: 200,
-        outH: 300,
-        flipZ: true,
-      });
+    try {
+      const scalarData = getVolumeScalarData(volume);
+      if (!scalarData) {
+        console.warn('[crosssec] volume scalarData not accessible — skipping render');
+        return;
+      }
+      const dimensions = safeVolumeAttr(volume, 'dimensions');
+      const spacing    = safeVolumeAttr(volume, 'spacing');
+      const origin     = safeVolumeAttr(volume, 'origin');
+      if (!dimensions || !spacing || !origin) {
+        console.warn('[crosssec] volume geometry missing — skipping render');
+        return;
+      }
+      const preset = presetTable.find((p) => p.name === activePreset) || presetTable[0];
+      const voi = preset
+        ? { lower: preset.wc - preset.ww / 2, upper: preset.wc + preset.ww / 2 }
+        : { lower: -1000, upper: 3000 };
+      const samples = densifyArch(archPoints, CROSSSEC_COUNT);
+      for (let i = 0; i < CROSSSEC_COUNT; i++) {
+        const canvas = xsCanvasRefs.current[i];
+        const sample = samples[i];
+        if (!canvas || !sample) continue;
+        renderCrossSection(canvas, {
+          scalarData,
+          dimensions, spacing, origin,
+          sample,
+          widthMM: xsWidthMM,
+          tangentSlabMM: 1,
+          voi,
+          outW: 200,
+          outH: 300,
+          flipZ: true,
+        });
+      }
+    } catch (e) {
+      console.error('[crosssec] render crashed:', e);
     }
   }, [stage, viewMode, archPoints, xsWidthMM, activePreset, presetTable]);
 
   // Render the pano canvas whenever points / VOI / slab changes.
+  // Wrapped in try/catch — Cornerstone v4's volume API has multiple
+  // null traps (imageData not yet built, scalarData not populated,
+  // dimensions/spacing/origin sometimes flat arrays, sometimes via
+  // vtk methods). Any one of them throwing would white-screen the
+  // entire viewer (React error boundary not yet hooked up).
   useEffect(() => {
     if (stage !== 'ready') return;
     if (viewMode !== 'pano') return;
     const canvas = panoCanvasRef.current;
     const volume = cachedVolumeRef.current;
     if (!canvas || !volume || archPoints.length < 3) return;
-    const scalarData = getVolumeScalarData(volume);
-    if (!scalarData) return;
-    const preset = presetTable.find((p) => p.name === activePreset) || presetTable[0];
-    const voi = preset
-      ? { lower: preset.wc - preset.ww / 2, upper: preset.wc + preset.ww / 2 }
-      : { lower: -1000, upper: 3000 };
-    renderArchPano(canvas, {
-      scalarData,
-      dimensions: Array.isArray(volume.dimensions) ? volume.dimensions : [
-        volume.imageData.getDimensions()[0],
-        volume.imageData.getDimensions()[1],
-        volume.imageData.getDimensions()[2],
-      ],
-      spacing: Array.isArray(volume.spacing) ? volume.spacing : volume.imageData.getSpacing(),
-      origin: Array.isArray(volume.origin) ? volume.origin : volume.imageData.getOrigin(),
-      archPoints,
-      slabMM: archSlabMM,
-      voi,
-      panoWidth: 900,
-      panoHeight: 400,
-      flipZ: true,
-    });
+    try {
+      const scalarData = getVolumeScalarData(volume);
+      if (!scalarData) {
+        console.warn('[pano] volume scalarData not accessible — skipping render');
+        return;
+      }
+      const dimensions = safeVolumeAttr(volume, 'dimensions');
+      const spacing    = safeVolumeAttr(volume, 'spacing');
+      const origin     = safeVolumeAttr(volume, 'origin');
+      if (!dimensions || !spacing || !origin) {
+        console.warn('[pano] volume geometry missing — skipping render');
+        return;
+      }
+      const preset = presetTable.find((p) => p.name === activePreset) || presetTable[0];
+      const voi = preset
+        ? { lower: preset.wc - preset.ww / 2, upper: preset.wc + preset.ww / 2 }
+        : { lower: -1000, upper: 3000 };
+      renderArchPano(canvas, {
+        scalarData,
+        dimensions, spacing, origin,
+        archPoints,
+        slabMM: archSlabMM,
+        voi,
+        panoWidth: 900,
+        panoHeight: 400,
+        flipZ: true,
+      });
+    } catch (e) {
+      console.error('[pano] render crashed:', e);
+    }
   }, [stage, viewMode, archPoints, archSlabMM, activePreset, presetTable]);
 
   // ── Annotation list refresh ────────────────────────────────────────
@@ -1950,12 +2011,23 @@ export default function CBCTViewerPage() {
   // displayed list with each event.
   useEffect(() => {
     if (stage !== 'ready') return;
+    // Tool names that COUNT as measurements for the left-rail panel.
+    // Crosshairs writes an annotation per viewport (one per MPR panel)
+    // but those are interaction state, not clinical measurements —
+    // showing them as "4 measurements" before the user has measured
+    // anything is confusing. Filter them out.
+    const MEASUREMENT_TOOLS = new Set([
+      'Length', 'Angle', 'Bidirectional', 'Probe',
+      'RectangleROI', 'CircleROI', 'EllipticalROI',
+    ]);
+
     const refresh = () => {
       try {
         const all = cornerstoneTools.annotation?.state?.getAllAnnotations?.() || [];
         const list = [];
         for (const a of all) {
           const tool = a.metadata?.toolName || '?';
+          if (!MEASUREMENT_TOOLS.has(tool)) continue;
           const text = a.data?.cachedStats
             ? Object.values(a.data.cachedStats)[0]
             : null;

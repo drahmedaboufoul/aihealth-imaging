@@ -345,14 +345,47 @@ export function renderCrossSection(canvas, opts) {
 
 /**
  * Convenience: pull the scalar buffer from a Cornerstone3D volume in a
- * version-tolerant way. v4 has several access paths depending on whether
+ * version-tolerant way. Cornerstone has changed this API multiple
+ * times across 4.x — try every known path and return null if none
+ * work so callers can render an error state instead of crashing. v4 has several access paths depending on whether
  * the volume was streamed or created locally.
  */
 export function getVolumeScalarData(volume) {
-  if (typeof volume?.getScalarData === 'function') return volume.getScalarData();
-  if (volume?.scalarData) return volume.scalarData;
-  if (volume?.imageData?.getPointData) {
-    return volume.imageData.getPointData().getScalars().getData();
-  }
+  if (!volume) return null;
+  // 1. getScalarData() method (Cornerstone 4.x classic streaming volumes)
+  try {
+    if (typeof volume.getScalarData === 'function') {
+      const d = volume.getScalarData();
+      if (d && d.length) return d;
+    }
+  } catch (_) {}
+  // 2. Direct scalarData property
+  try {
+    if (volume.scalarData && volume.scalarData.length) return volume.scalarData;
+  } catch (_) {}
+  // 3. voxelManager.getCompleteScalarDataArray (CS3D 4.5+)
+  try {
+    if (volume.voxelManager?.getCompleteScalarDataArray) {
+      const d = volume.voxelManager.getCompleteScalarDataArray();
+      if (d && d.length) return d;
+    }
+  } catch (_) {}
+  // 4. voxelManager.scalarData
+  try {
+    if (volume.voxelManager?.scalarData && volume.voxelManager.scalarData.length) {
+      return volume.voxelManager.scalarData;
+    }
+  } catch (_) {}
+  // 5. vtkImageData scalar buffer (the path that was crashing on null)
+  try {
+    const pd = volume.imageData?.getPointData?.();
+    if (pd) {
+      const scalars = pd.getScalars?.();
+      if (scalars) {
+        const d = scalars.getData?.();
+        if (d && d.length) return d;
+      }
+    }
+  } catch (_) {}
   return null;
 }

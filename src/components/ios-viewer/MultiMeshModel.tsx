@@ -265,6 +265,10 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
             visible={visible}
             castShadow
             receiveShadow
+            // Tag each mesh with its role + label so downstream tools
+            // (occlusal contact map, FDI tooth picker, comparison
+            // overlay) can find them via scene.traverse + userData.
+            userData={{ role: m.role, label: m.label, layerKey: meshKey }}
           >
             <meshPhysicalMaterial
               color={m.hasVertexColors ? 0xffffff : style.color}

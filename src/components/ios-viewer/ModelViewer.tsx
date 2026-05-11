@@ -6,6 +6,7 @@ import type { Patient, Scan, ViewerSettings, ToolType, MouseSettings } from './t
 import { MultiMeshModel, type MeshFile } from './MultiMeshModel';
 import MeasureTool from './MeasureTool';
 import SceneEffects from './SceneEffects';
+import OcclusalContactMap from './OcclusalContactMap';
 import MeasurementOverlay from './components/MeasurementOverlay';
 import { useIOSViewerStore } from './store/iosViewerStore';
 import { Button } from '@/components/ui/button';
@@ -682,6 +683,20 @@ export function ModelViewer({
           </div>
         )}
 
+        {/* Occlusal contact map legend — visible only when tool active. */}
+        {!readOnly && activeTool === 'occlusal' && (
+          <div className="absolute left-16 top-1/2 -translate-y-1/2 z-10 bg-white rounded-lg shadow-lg border border-gray-200 p-2 flex flex-col gap-1.5 text-xs">
+            <div className="text-[9px] font-bold uppercase tracking-wider text-gray-500 px-1">Occlusal contact</div>
+            <LegendRow color="#f22626" label="Touching (≤0.2mm)" />
+            <LegendRow color="#f2a633" label="Near (≤0.5mm)" />
+            <LegendRow color="#f5d166" label="Light (≤1.5mm)" />
+            <LegendRow color="#66d966" label="No contact" />
+            <div className="text-[10px] text-gray-500 px-1 pt-1 border-t border-gray-100">
+              Heatmap painted on maxilla
+            </div>
+          </div>
+        )}
+
         {/* Measure sub-tool picker (distance vs angle) — shown only when
             Measurement tool is active. Sits next to the left toolbar. */}
         {!readOnly && activeTool === 'measure' && (
@@ -786,6 +801,11 @@ export function ModelViewer({
 
             {/* Renders committed measurements (lines + labels) in 3D. */}
             <MeasurementOverlay />
+
+            {/* Occlusal contact heatmap on the maxilla — paints vertices
+                red (touching), amber (near), green (no contact) based on
+                ray-down distance to the mandible. */}
+            <OcclusalContactMap active={activeTool === 'occlusal' && !readOnly} />
 
             {/* Wires the clipping plane + material UI to actual scene meshes. */}
             <SceneEffects />
@@ -1115,6 +1135,17 @@ export function ModelViewer({
         mouseSettings={mouseSettings}
         onUpdateMouseSettings={onUpdateMouseSettings}
       />
+    </div>
+  );
+}
+
+function LegendRow({ color, label }: { color: string; label: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <div
+        style={{ width: 14, height: 14, backgroundColor: color, borderRadius: 3, border: '1px solid rgba(0,0,0,0.1)' }}
+      />
+      <span className="text-gray-700">{label}</span>
     </div>
   );
 }

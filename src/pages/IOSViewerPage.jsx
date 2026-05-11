@@ -24,7 +24,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, Link, useNavigate, useLocation } from 'react-router-dom';
-import { Loader2, AlertCircle, ArrowLeft, ExternalLink } from 'lucide-react';
+import { Loader2, AlertCircle, ArrowLeft, ExternalLink, GitCompare, X } from 'lucide-react';
 import { resolveSignedUrl, resolveStudyFiles } from '../lib/signedUrl';
 import { ModelViewer } from '../components/ios-viewer/ModelViewer';
 import { supabase } from '../lib/supabase';
@@ -43,6 +43,17 @@ export default function IOSViewerPage() {
   // Patient HUD info pulled from the study (when in study mode) so the
   // viewer can label whose scan this is. Falls back to URL ?name= param.
   const [hud, setHud] = useState(null); // { patientName, studyDate, studyType }
+
+  // Phase 5.2 — two-scan comparison state.
+  // comparisonFiles is the same shape as files (array of {url, fileName, fileType}).
+  // null when no comparison active.
+  const [comparisonFiles, setComparisonFiles] = useState(null);
+  const [comparisonStudyInfo, setComparisonStudyInfo] = useState(null);
+  const [comparisonOpacity, setComparisonOpacity] = useState(0.55);
+  const [comparisonColor, setComparisonColor] = useState('#22d3ee'); // cyan
+  const [showCompareDialog, setShowCompareDialog] = useState(false);
+  const [availableStudies, setAvailableStudies] = useState([]);
+  const [loadingCompare, setLoadingCompare] = useState(false);
 
   // Viewer settings — same shape as EMR.
   // meshLayers is populated by MultiMeshModel after files load and supersedes
@@ -215,8 +226,105 @@ export default function IOSViewerPage() {
     );
   }
 
+  // Open the comparison-study picker. Pulls all OTHER IOS studies for
+  // this patient (or all clinic IOS studies if no patient context).
+  const openComparePicker = async () => {
+    if (!hud?.patientName && !studyId) return; // need a study context
+    setShowCompareDialog(true);
+    setLoadingCompare(true);
+    try {
+      // Get patient_id of the current study
+      let patientId = null;
+      if (studyId) {
+        const { data } = await supabase
+          .from('imaging_studies').select('patient_id').eq('id', studyId).maybeSingle();
+        patientId = data?.patient_id;
+      }
+      if (!patientId) { setAvailableStudies([]); setLoadingCompare(false); return; }
+      const { data: rows } = await supabase
+        .from('imaging_studies')
+        .select('id, study_type, study_date, description')
+        .eq('patient_id', patientId)
+        .in('study_type', ['intraoral_scan'])
+        .neq('id', studyId)
+        .order('study_date', { ascending: false });
+      setAvailableStudies(rows || []);
+    } catch (e) {
+      console.warn('[compare] picker load failed:', e?.message);
+      setAvailableStudies([]);
+    } finally {
+      setLoadingCompare(false);
+    }
+  };
+
+  const selectComparisonStudy = async (chosenStudyId, label) => {
+    try {
+      const arr = await resolveStudyFiles(chosenStudyId);
+      setComparisonFiles(arr.map((f) => ({
+        url: f.url, fileName: f.fileName, fileType: f.fileKind,
+      })));
+      setComparisonStudyInfo({ id: chosenStudyId, label });
+      setShowCompareDialog(false);
+    } catch (e) {
+      alert('Could not load study: ' + (e?.message || e));
+    }
+  };
+
+  const clearComparison = () => {
+    setComparisonFiles(null);
+    setComparisonStudyInfo(null);
+  };
+
   return (
     <div className="h-screen w-screen overflow-hidden">
+      {/* Compare picker dialog */}
+      {showCompareDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          onClick={() => setShowCompareDialog(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-lg shadow-2xl max-w-md w-full mx-4 p-5"
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                <GitCompare size={16} className="text-cyan-600" />
+                Compare with another scan
+              </h2>
+              <button onClick={() => setShowCompareDialog(false)} className="text-gray-400 hover:text-gray-700">
+                <X size={16} />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mb-4">
+              Pick another IOS scan from this patient to overlay on top of the current one.
+              The overlay renders in cyan with adjustable opacity for direct comparison.
+            </p>
+            {loadingCompare ? (
+              <div className="text-sm text-gray-500 flex items-center gap-2"><Loader2 size={14} className="animate-spin" /> Loading…</div>
+            ) : availableStudies.length === 0 ? (
+              <div className="text-sm text-gray-500 italic">No other IOS scans for this patient.</div>
+            ) : (
+              <div className="space-y-1.5 max-h-72 overflow-auto">
+                {availableStudies.map((s) => {
+                  const label = s.description || `Scan · ${new Date(s.study_date).toLocaleDateString('en-GB')}`;
+                  return (
+                    <button
+                      key={s.id}
+                      onClick={() => selectComparisonStudy(s.id, label)}
+                      className="w-full text-left text-sm px-3 py-2 rounded border border-gray-200 hover:border-cyan-400 hover:bg-cyan-50/50 transition-colors"
+                    >
+                      <div className="font-medium text-gray-900">{label}</div>
+                      <div className="text-xs text-gray-500">{new Date(s.study_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {isDemo && (
         <div className="absolute top-2 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
           <div className="bg-accent text-bg text-[11px] font-medium px-3 py-1 rounded-full shadow-lg">
@@ -250,6 +358,68 @@ export default function IOSViewerPage() {
           </div>
         </div>
       )}
+      {/* Compare button + active overlay panel — hidden in read-only patient embed */}
+      {!readOnly && !isDemo && studyId && (
+        <div className="absolute bottom-3 left-3 z-30">
+          {!comparisonFiles ? (
+            <button
+              onClick={openComparePicker}
+              className="bg-white text-gray-800 text-[11px] font-semibold px-3 py-1.5 rounded-lg shadow-md border border-gray-200 hover:bg-cyan-50 hover:border-cyan-300 flex items-center gap-1.5"
+            >
+              <GitCompare size={12} className="text-cyan-600" />
+              Compare with another scan
+            </button>
+          ) : (
+            <div className="bg-white rounded-lg shadow-md border border-gray-200 p-2.5 min-w-64">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-cyan-700 flex items-center gap-1">
+                  <GitCompare size={10} /> Comparing
+                </div>
+                <button
+                  onClick={clearComparison}
+                  className="text-gray-400 hover:text-red-600 text-[10px]"
+                  title="Stop comparing"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+              <div className="text-xs text-gray-700 font-medium mb-1.5 truncate">
+                {comparisonStudyInfo?.label || 'Second scan'}
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-gray-600">
+                <span>Opacity</span>
+                <input
+                  type="range" min={0.1} max={1} step={0.05}
+                  value={comparisonOpacity}
+                  onChange={(e) => setComparisonOpacity(Number(e.target.value))}
+                  className="flex-1 accent-cyan-600"
+                />
+                <span className="font-mono w-8 text-right">{Math.round(comparisonOpacity * 100)}%</span>
+              </div>
+              <div className="flex items-center gap-1 mt-1.5">
+                {[
+                  { c: '#22d3ee', name: 'cyan' },
+                  { c: '#a855f7', name: 'purple' },
+                  { c: '#ef4444', name: 'red' },
+                  { c: '#fbbf24', name: 'amber' },
+                ].map((opt) => (
+                  <button
+                    key={opt.c}
+                    onClick={() => setComparisonColor(opt.c)}
+                    title={opt.name}
+                    style={{
+                      width: 18, height: 18, borderRadius: 4, backgroundColor: opt.c,
+                      border: comparisonColor === opt.c ? '2px solid #1f2937' : '1px solid #d4d4d8',
+                      cursor: 'pointer',
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       <ModelViewer
         scan={scan}
         patient={patient}
@@ -267,6 +437,9 @@ export default function IOSViewerPage() {
         onMeshesReady={(layers) =>
           setViewerSettings((s) => ({ ...s, meshLayers: layers }))
         }
+        comparisonFiles={comparisonFiles}
+        comparisonOpacity={comparisonOpacity}
+        comparisonColor={comparisonColor}
       />
     </div>
   );

@@ -8,6 +8,8 @@ import MeasureTool from './MeasureTool';
 import SceneEffects from './SceneEffects';
 import OcclusalContactMap from './OcclusalContactMap';
 import ToothPicker from './ToothPicker';
+import MarginTraceTool from './MarginTraceTool';
+import ComparisonModel from './ComparisonModel';
 import MeasurementOverlay from './components/MeasurementOverlay';
 import { useIOSViewerStore } from './store/iosViewerStore';
 import { Button } from '@/components/ui/button';
@@ -28,6 +30,7 @@ import {
   ChevronLeft,
   Monitor,
   Hash,
+  Spline,
 } from 'lucide-react';
 
 interface ModelViewerProps {
@@ -51,6 +54,12 @@ interface ModelViewerProps {
    *  occlusal contact, analysis, mouse settings) but keeps orbit/zoom/
    *  pan/layer toggles/view presets. */
   readOnly?: boolean;
+  /** Phase 5.2 — secondary scan files for before/after comparison.
+   *  When provided, ComparisonModel renders them tinted + transparent
+   *  on top of the primary scan. */
+  comparisonFiles?: MeshFile[] | null;
+  comparisonOpacity?: number;
+  comparisonColor?: string;
 }
 
 // File-based 3D Model Component
@@ -562,6 +571,9 @@ export function ModelViewer({
   files,
   onMeshesReady,
   readOnly = false,
+  comparisonFiles,
+  comparisonOpacity = 0.55,
+  comparisonColor = '#22d3ee',
 }: ModelViewerProps) {
   const isMultiFile = !!(files && files.length > 0);
   const [isLoading, setIsLoading] = useState(true);
@@ -636,6 +648,7 @@ export function ModelViewer({
     { id: 'measure' as ToolType, icon: Ruler, label: 'Measurement' },
     { id: 'occlusal' as ToolType, icon: CircleDot, label: 'Occlusal Contact' },
     { id: 'tooth-label' as ToolType, icon: Hash, label: 'FDI Tooth Label' },
+    { id: 'margin' as ToolType, icon: Spline, label: 'Margin trace' },
     { id: 'analysis' as ToolType, icon: BarChart3, label: 'Analysis' },
   ];
 
@@ -768,6 +781,15 @@ export function ModelViewer({
               <DentalModel viewerSettings={viewerSettings} activeTool={activeTool} />
             )}
 
+            {/* Comparison overlay — only when comparisonFiles is provided */}
+            {comparisonFiles && comparisonFiles.length > 0 && (
+              <ComparisonModel
+                files={comparisonFiles}
+                opacity={comparisonOpacity}
+                color={comparisonColor}
+              />
+            )}
+
             {viewerSettings.showGrid && (
               <Grid
                 args={[10, 10]}
@@ -814,6 +836,11 @@ export function ModelViewer({
                 label pins to the mesh. Smart-suggests quadrant from the
                 clicked mesh's role + X coord. */}
             <ToothPicker active={activeTool === 'tooth-label' && !readOnly} />
+
+            {/* Margin tracing — freehand polyline on the mesh surface for
+                crown / inlay prep margins. Click sequence + double-click
+                near start to close, Esc to cancel. */}
+            <MarginTraceTool active={activeTool === 'margin' && !readOnly} />
 
             {/* Wires the clipping plane + material UI to actual scene meshes. */}
             <SceneEffects />

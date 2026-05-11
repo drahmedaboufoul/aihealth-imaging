@@ -1374,7 +1374,10 @@ export default function CBCTViewerPage() {
     setAiRunning((r) => ({ ...r, [modelKey]: true }));
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      const emrBase = import.meta.env.VITE_EMR_BASE_URL || 'https://aihealthmc.ae';
+      // The EMR's production URL on Vercel. Override in production by
+      // setting VITE_EMR_BASE_URL on the aihealth-imaging Vercel project
+      // (e.g., to a custom domain once aihealthmc.ae is pointed at Vercel).
+      const emrBase = import.meta.env.VITE_EMR_BASE_URL || 'https://aihealthmc.vercel.app';
       const resp = await fetch(`${emrBase}/api/ai-infer`, {
         method: 'POST',
         headers: {

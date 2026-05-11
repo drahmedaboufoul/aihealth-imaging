@@ -756,6 +756,13 @@ export default function CBCTViewerPage() {
   // re-renders whenever the points or VOI change.
   const [archPoints, setArchPoints]   = useState([]);
   const [archSlabMM, setArchSlabMM]   = useState(8); // perp slab thickness mm
+  // Explicit "Trace Arch" tool — when true, ANY left-click on the axial
+  // adds an arch point. When false, only Shift+Click adds points (legacy
+  // shortcut). This makes the workflow discoverable instead of hidden
+  // behind a keyboard modifier.
+  const [tracingArch, setTracingArch] = useState(false);
+  // AI auto-trace status flag, used to disable the button + show "Running…"
+  const [archAiRunning, setArchAiRunning] = useState(false);
   const panoCanvasRef                 = useRef(null);
 
   // Phase 3.3 cross-sections — N thin slices perpendicular to the arch
@@ -1386,6 +1393,14 @@ export default function CBCTViewerPage() {
           setNervePoints(body.polyline);
           if (typeof body.safety_zone_mm === 'number') setSafetyZoneMM(body.safety_zone_mm);
         }
+      } else if (modelKey === 'arch-curve' && Array.isArray(body.archPoints) && body.archPoints.length >= 3) {
+        // Arch-curve returns 2D points [x, y] in world mm (Z is derived
+        // from the current Pano focal slice). Auto-apply when on Pano,
+        // confirm when on other views.
+        const replace = archPoints.length === 0 || window.confirm(
+          `AI suggested ${body.archPoints.length} arch points (${body.model_state}). Replace existing arch?`
+        );
+        if (replace) setArchPoints(body.archPoints);
       }
     } catch (e) {
       console.error('[cbct] AI infer failed:', e);
@@ -1837,11 +1852,12 @@ export default function CBCTViewerPage() {
       // Only react to LEFT-click on the canvas itself; ignore right /
       // middle / drag (those are W/L / pan / etc.).
       if (e.button !== 0) return;
-      // Tool group binding has Primary = Crosshair by default. For arch
-      // tracing we want left-click to add a point — but ONLY when no
-      // measurement tool is active. Easiest: hold Shift to add an arch
-      // point. Otherwise the click goes through to the active tool.
-      if (!e.shiftKey) return;
+      // Two ways to add an arch point:
+      //   1. Trace Arch tool active → plain left-click (no modifier)
+      //   2. Shift+Click anywhere → quick-add (works regardless of tool)
+      // Otherwise the click passes through to whatever crosshair/W/L
+      // binding is currently active.
+      if (!tracingArch && !e.shiftKey) return;
       e.preventDefault();
       e.stopPropagation();
       // Use viewport.canvasToWorld() to convert click pixels → world mm
@@ -1856,7 +1872,7 @@ export default function CBCTViewerPage() {
 
     el.addEventListener('mousedown', onClick, { capture: true });
     return () => el.removeEventListener('mousedown', onClick, { capture: true });
-  }, [stage, viewMode]);
+  }, [stage, viewMode, tracingArch]);
 
   // Render the 16 cross-section canvases whenever points / VOI change
   // and viewMode is 'crosssec'.
@@ -2347,7 +2363,7 @@ export default function CBCTViewerPage() {
                 className="absolute top-2 left-2 text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded pointer-events-none"
                 style={{ backgroundColor: 'rgba(11,13,16,0.6)', color: '#10b981', borderLeft: '2px solid #10b981' }}
               >
-                Axial &middot; Shift+Click to trace arch
+                Axial {tracingArch ? '· TRACING — click to add points' : '· enable Trace Arch (bottom-left)'}
               </div>
               {/* SVG overlay for arch points + spline preview */}
               <ArchOverlay
@@ -2357,10 +2373,35 @@ export default function CBCTViewerPage() {
               />
               {/* Floating tools card — arch controls */}
               <div
-                className="absolute bottom-3 left-3 rounded-lg p-2.5 text-xs space-y-1.5"
-                style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128', width: 220 }}
+                className="absolute bottom-3 left-3 rounded-lg p-2.5 text-xs space-y-1.5 z-30"
+                style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128', width: 240 }}
               >
-                <div className="flex items-center justify-between">
+                {/* Trace Arch tool toggle — primary action */}
+                <button
+                  onClick={() => setTracingArch((v) => !v)}
+                  className={`w-full text-[11px] py-2 rounded font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+                    tracingArch
+                      ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                      : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
+                  }`}
+                  title={tracingArch ? 'Click to stop arch tracing' : 'Click to enable arch tracing — then click on axial'}
+                >
+                  <Activity size={11} />
+                  {tracingArch ? 'Tracing — click on axial' : 'Trace Arch'}
+                </button>
+
+                {/* AI auto-trace */}
+                <button
+                  onClick={() => runAiInference('arch-curve')}
+                  disabled={archAiRunning || !!aiRunning['arch-curve']}
+                  className="w-full text-[10px] py-1.5 rounded bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white flex items-center justify-center gap-1.5"
+                  title="AI auto-traces the dental arch"
+                >
+                  <Sparkles size={10} />
+                  {aiRunning['arch-curve'] ? 'AI running…' : 'AI auto-trace'}
+                </button>
+
+                <div className="flex items-center justify-between pt-1 border-t border-gray-800">
                   <span className="text-gray-400">Arch points</span>
                   <span className="font-mono text-amber-300">{archPoints.length}</span>
                 </div>
@@ -2394,7 +2435,9 @@ export default function CBCTViewerPage() {
                   </button>
                 </div>
                 <p className="text-[10px] text-gray-500 leading-tight pt-1 border-t border-gray-800">
-                  Click ≥3 points along the dental arch on axial. The pano on the right regenerates in real time.
+                  Click <b>Trace Arch</b> then click ≥3 points on axial.
+                  Or <b>AI auto-trace</b> for a one-click suggestion (then refine).
+                  Shift+Click also works without enabling tracing.
                 </p>
               </div>
             </div>
@@ -2407,12 +2450,17 @@ export default function CBCTViewerPage() {
               />
               {archPoints.length < 3 && (
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <div className="text-center max-w-xs px-4">
+                  <div className="text-center max-w-sm px-4">
                     <div className="text-amber-500 text-xs uppercase tracking-wider mb-2">Trace the arch</div>
                     <p className="text-gray-400 text-xs leading-relaxed">
-                      On the axial view (left), <span className="text-gray-200 font-semibold">Shift+Click</span> at
-                      least 3 points along the midline of the dental arch
+                      Click <span className="text-amber-300 font-semibold">Trace Arch</span> (bottom-left)
+                      then click at least 3 points along the midline of the dental arch on axial
                       (anterior → premolar → molar → posterior).
+                    </p>
+                    <div className="my-3 text-[10px] text-gray-500">— or —</div>
+                    <p className="text-gray-400 text-xs leading-relaxed">
+                      Click <span className="text-purple-300 font-semibold">AI auto-trace</span> for
+                      a one-click suggestion. You can refine the points after.
                     </p>
                   </div>
                 </div>

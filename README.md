@@ -14,7 +14,7 @@ PACS and DICOM/CBCT/IOS viewing is a separate product, not an EMR feature. Diffe
 ## Phase 1 architecture
 
 - **Stack:** Vite + React 18 + Tailwind + shadcn/ui + Supabase
-- **Auth:** shared Supabase project (`bxtqnfylaiimbgjweywi`) with the EMR. Same auth session — no handoff needed in phase 1
+- **Auth:** shared Supabase project (`<your-supabase-project>`) with the EMR. Same auth session — no handoff needed in phase 1
 - **Storage:** reads from EMR's existing `patient-files` and `encounter-files` Supabase storage buckets (no migration in phase 1)
 - **Renderer:** Three.js for 3D meshes today; will adopt Cornerstone3D + OHIF Viewer for DICOM/CBCT in phase 2
 - **Embed:** EMR opens viewers via `window.open('imaging.aihealth.app/viewer/...')`

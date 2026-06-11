@@ -214,8 +214,9 @@ export async function loadDicom(arrayBuffer) {
  * Map a DICOM frame's pixels through the modality LUT (slope/intercept) and
  * VOI LUT (windowCenter/windowWidth) into 8-bit grayscale RGBA, writing
  * directly into the provided ImageData (avoids per-frame allocation).
+ * Exported for unit testing — pure function of its inputs.
  */
-function renderFrameToImageData({ meta, pixels, frameIndex, windowCenter, windowWidth, imageData }) {
+export function renderFrameToImageData({ meta, pixels, frameIndex, windowCenter, windowWidth, imageData }) {
   const { rows, columns, rescaleSlope, rescaleIntercept, photometricInterpretation } = meta;
   const pixPerFrame = rows * columns;
   const offset = pixPerFrame * (frameIndex || 0);

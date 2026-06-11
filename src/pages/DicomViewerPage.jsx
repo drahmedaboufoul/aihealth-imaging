@@ -19,6 +19,7 @@ import { useSearchParams, useNavigate, useLocation } from 'react-router-dom';
 import { Loader2, AlertCircle, ArrowLeft, Sun, RotateCcw, Camera } from 'lucide-react';
 import { resolveSignedUrl, resolveStudyDicomFiles } from '../lib/signedUrl';
 import { initCornerstone, imageIdFromSignedUrl, cornerstone, cornerstoneTools } from '../lib/cornerstoneInit';
+import { formatPatientName, formatDate } from '../lib/dicomFormat';
 import { supabase } from '../lib/supabase';
 
 const SHELL_BG = '#0b0d10';
@@ -43,15 +44,6 @@ const WL_PRESETS_BY_MODALITY = {
   MR: [{ name: 'Default', wc: 600, ww: 1600 }],
   DEFAULT: [],
 };
-
-function formatPatientName(name) {
-  if (!name) return null;
-  return name.split('^').filter(Boolean).join(' ');
-}
-function formatDate(yyyymmdd) {
-  if (!yyyymmdd || yyyymmdd.length < 8) return yyyymmdd;
-  return `${yyyymmdd.slice(0,4)}-${yyyymmdd.slice(4,6)}-${yyyymmdd.slice(6,8)}`;
-}
 
 export default function DicomViewerPage() {
   const [searchParams] = useSearchParams();

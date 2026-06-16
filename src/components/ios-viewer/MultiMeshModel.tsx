@@ -16,7 +16,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { detectScanRole, ROLE_STYLE, ROLE_TO_SETTING } from './utils/roleDetection';
+import { detectScanRole, ROLE_STYLE, ROLE_TO_SETTING, UNKNOWN_PALETTE } from './utils/roleDetection';
 import { computeAutoOrient } from './utils/autoOrient';
 
 export interface MeshFile {
@@ -86,11 +86,40 @@ async function loadOneFile(file: MeshFile): Promise<LoadedMesh> {
     const { OBJLoader } = await import('three/examples/jsm/loaders/OBJLoader');
     const text = new TextDecoder().decode(buffer);
     const obj = new OBJLoader().parse(text);
+    obj.updateMatrixWorld(true);
+    // OBJLoader splits a textured/multi-material OBJ into one child mesh per
+    // material group. Grabbing only the first child silently drops the rest of
+    // the surface — which can make an arch look truncated and break the visual
+    // bite. Collect EVERY child mesh and, if there's more than one, merge their
+    // positions. Each child's world matrix is baked in so the merged mesh keeps
+    // its native (co-registered) coordinates — never re-centered per child.
+    const childGeoms: THREE.BufferGeometry[] = [];
     obj.traverse((child: THREE.Object3D) => {
-      if ((child as THREE.Mesh).isMesh && !geometry) {
-        geometry = (child as THREE.Mesh).geometry as THREE.BufferGeometry;
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh && mesh.geometry && (mesh.geometry as THREE.BufferGeometry).attributes?.position) {
+        const g = (mesh.geometry as THREE.BufferGeometry).clone();
+        mesh.updateWorldMatrix(true, false);
+        if (!mesh.matrixWorld.equals(new THREE.Matrix4())) g.applyMatrix4(mesh.matrixWorld);
+        childGeoms.push(g);
       }
     });
+    if (childGeoms.length === 1) {
+      geometry = childGeoms[0];
+    } else if (childGeoms.length > 1) {
+      // Concatenate positions into one non-indexed BufferGeometry (OBJLoader
+      // output is non-indexed triangle soup, so this is a valid merge).
+      let total = 0;
+      for (const g of childGeoms) total += g.attributes.position.count;
+      const merged = new Float32Array(total * 3);
+      let offset = 0;
+      for (const g of childGeoms) {
+        const arr = g.attributes.position.array as ArrayLike<number>;
+        merged.set(arr as Float32Array, offset);
+        offset += g.attributes.position.count * 3;
+      }
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(merged, 3));
+    }
   } else {
     throw new Error(`Unsupported 3D scan format: ${ext}`);
   }
@@ -234,6 +263,19 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
     return c.negate();
   }, [groupBounds]);
 
+  // Per-mesh render color. Named roles keep their themed color; role-'unknown'
+  // meshes (e.g. Fussen TextureMesh<N>_<M> exports, which carry no role in the
+  // filename) each get a distinct palette color so the co-registered segments
+  // are tellable apart and the bite between arches is visible.
+  const meshColors = useMemo(() => {
+    let u = 0;
+    return meshes.map((m) =>
+      m.role === 'unknown'
+        ? UNKNOWN_PALETTE[u++ % UNKNOWN_PALETTE.length]
+        : ROLE_STYLE[m.role].color,
+    );
+  }, [meshes]);
+
   if (meshes.length === 0) return null;
 
   return (
@@ -271,7 +313,7 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
             userData={{ role: m.role, label: m.label, layerKey: meshKey }}
           >
             <meshPhysicalMaterial
-              color={m.hasVertexColors ? 0xffffff : style.color}
+              color={m.hasVertexColors ? 0xffffff : meshColors[idx]}
               vertexColors={m.hasVertexColors}
               roughness={style.roughness}
               metalness={0.05}

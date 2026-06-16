@@ -48,11 +48,35 @@ export function detectScanRole(filename) {
  *   - unknown:   safe greige
  */
 export const ROLE_STYLE = {
+  // Upper warm, lower cool — deliberately distinct hues so that when the two
+  // arches are loaded in occlusion (their native, co-registered position) the
+  // bite line between them is actually visible instead of one fused blob.
   maxilla:   { color: '#E8D5B5', emissiveIntensity: 0.02, roughness: 0.55, label: 'Upper jaw' },
-  mandible:  { color: '#EFE4D2', emissiveIntensity: 0.02, roughness: 0.55, label: 'Lower jaw' },
+  mandible:  { color: '#BFD7E8', emissiveIntensity: 0.02, roughness: 0.55, label: 'Lower jaw' },
   occlusion: { color: '#D9CDB8', emissiveIntensity: 0.02, roughness: 0.6,  label: 'Occlusion' },
   unknown:   { color: '#D8CFC1', emissiveIntensity: 0.02, roughness: 0.6,  label: '3D scan' },
 };
+
+/**
+ * Distinct colors for meshes whose role can't be read from the filename
+ * (e.g. Fussen DentalFlex exports named TextureMesh<N>_<M>.obj). The scanner
+ * exports every segment of a case in ONE shared coordinate frame, so they load
+ * already registered to each other — but if they all render in the same color
+ * you can't tell the arches apart or see where they meet. Giving each mesh its
+ * own color makes the registered case readable without inventing clinical
+ * roles (we deliberately do NOT guess maxilla vs mandible from geometry).
+ *
+ * Warm/cool alternating so the two most common arches read as clearly
+ * different; soft, tooth-plausible tones throughout.
+ */
+export const UNKNOWN_PALETTE = [
+  '#E8D5B5', // warm cream
+  '#BFD7E8', // cool blue-ivory
+  '#E6C7A8', // peach
+  '#C9E0C4', // sage
+  '#E2C6DE', // mauve
+  '#D7D2BC', // olive-ivory
+];
 
 /**
  * Map role -> which viewerSettings visibility/opacity flag controls it.

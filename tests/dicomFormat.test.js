@@ -48,3 +48,29 @@ describe('formatDate', () => {
     expect(formatDate(undefined)).toBeUndefined();
   });
 });
+
+// Cornerstone's wadouri metadata provider returns parsed objects rather
+// than raw strings (parseDA → {year,month,day}; PN → {Alphabetic}) — the
+// formatters must accept both shapes (regression: HUD crashed the page
+// with "yyyymmdd.slice is not a function").
+describe('formatDate — parsed DA object shape', () => {
+  it('formats {year,month,day} with zero padding', () => {
+    expect(formatDate({ year: 2024, month: 1, day: 31 })).toBe('2024-01-31');
+    expect(formatDate({ year: 1999, month: 12, day: 5 })).toBe('1999-12-05');
+  });
+
+  it('returns null for incomplete objects', () => {
+    expect(formatDate({ year: 2024 })).toBeNull();
+    expect(formatDate({})).toBeNull();
+  });
+});
+
+describe('formatPatientName — parsed PN object shape', () => {
+  it('formats {Alphabetic} PN objects', () => {
+    expect(formatPatientName({ Alphabetic: 'Doe^Jane' })).toBe('Doe Jane');
+  });
+
+  it('returns null for objects without an alphabetic representation', () => {
+    expect(formatPatientName({})).toBeNull();
+  });
+});

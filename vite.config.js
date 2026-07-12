@@ -26,6 +26,19 @@ export default defineConfig({
     format: 'es',
   },
   optimizeDeps: {
-    exclude: ['@icr/polyseg-wasm'],
+    // dicom-image-loader must load its decode workers from source — the
+    // pre-bundled deps dir doesn't contain the worker file, so dev-server
+    // DICOM decoding 404s (production builds were unaffected). Its CJS
+    // codec deps then need explicit pre-bundling for ESM interop.
+    exclude: ['@icr/polyseg-wasm', '@cornerstonejs/dicom-image-loader'],
+    include: [
+      'dicom-parser',
+      // Deep subpath imports used by dicom-image-loader's decode workers —
+      // Emscripten CJS modules that need esbuild's ESM interop in dev.
+      '@cornerstonejs/codec-charls/decodewasmjs',
+      '@cornerstonejs/codec-libjpeg-turbo-8bit/decodewasmjs',
+      '@cornerstonejs/codec-openjpeg/decodewasmjs',
+      '@cornerstonejs/codec-openjph/wasmjs',
+    ],
   },
 });

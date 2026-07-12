@@ -14,12 +14,17 @@
  *   /viewer/dicom?study=<imaging_studies.id> CBCT / multi-instance series
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useSearchParams, useNavigate, useLocation } from 'react-router-dom';
-import { Loader2, AlertCircle, ArrowLeft, Sun, RotateCcw, Camera } from 'lucide-react';
+import {
+  Loader2, AlertCircle, ArrowLeft, Sun, RotateCcw, RotateCw, Camera,
+  Contrast, Move, ZoomIn, Ruler, Triangle, Plus, Activity,
+  Square, Circle as CircleIcon, Trash2, FlipHorizontal, FlipVertical,
+} from 'lucide-react';
 import { resolveSignedUrl, resolveStudyDicomFiles } from '../lib/signedUrl';
 import { initCornerstone, imageIdFromSignedUrl, cornerstone, cornerstoneTools } from '../lib/cornerstoneInit';
 import { formatPatientName, formatDate } from '../lib/dicomFormat';
+import { readSharePayload, shareDicomFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
 import { supabase } from '../lib/supabase';
 
 const SHELL_BG = '#0b0d10';
@@ -45,6 +50,36 @@ const WL_PRESETS_BY_MODALITY = {
   DEFAULT: [],
 };
 
+// Left-click tool palette. Key → { toolName getter, icon, label, hotkey }.
+// WindowLevel/Pan keep their radiology-convention secondary bindings
+// (right-drag / middle-drag) even while another tool owns left-click.
+const LEFT_TOOLS = [
+  { key: 'zoom',          icon: ZoomIn,     label: 'Zoom (1)',            hotkey: '1' },
+  { key: 'wl',            icon: Contrast,   label: 'Window/Level (2)',    hotkey: '2' },
+  { key: 'pan',           icon: Move,       label: 'Pan (3)',             hotkey: '3' },
+  { key: 'length',        icon: Ruler,      label: 'Length (4)',          hotkey: '4' },
+  { key: 'angle',         icon: Triangle,   label: 'Angle (5)',           hotkey: '5' },
+  { key: 'bidirectional', icon: Plus,       label: 'Bidirectional (6)',   hotkey: '6' },
+  { key: 'probe',         icon: Activity,   label: 'Pixel probe (7)',     hotkey: '7' },
+  { key: 'ellipseROI',    icon: CircleIcon, label: 'Ellipse ROI (8)',     hotkey: '8' },
+  { key: 'rectROI',       icon: Square,     label: 'Rectangle ROI (9)',   hotkey: '9' },
+];
+
+function leftToolName(key) {
+  const t = cornerstoneTools;
+  return {
+    zoom:          t.ZoomTool.toolName,
+    wl:            t.WindowLevelTool.toolName,
+    pan:           t.PanTool.toolName,
+    length:        t.LengthTool.toolName,
+    angle:         t.AngleTool.toolName,
+    bidirectional: t.BidirectionalTool.toolName,
+    probe:         t.ProbeTool.toolName,
+    ellipseROI:    t.EllipticalROITool.toolName,
+    rectROI:       t.RectangleROITool.toolName,
+  }[key];
+}
+
 export default function DicomViewerPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -53,6 +88,10 @@ export default function DicomViewerPage() {
   const filePath = searchParams.get('path');
   const studyId  = searchParams.get('study');
   const isDemo   = searchParams.get('demo') === '1';
+  // Tokenized share flow: SharedViewerPage validated the token server-side
+  // and stashed the resolved payload (signed URLs) in sessionStorage.
+  const shareKey = searchParams.get('share');
+  const sharePayload = useMemo(() => readSharePayload(shareKey), [shareKey]);
 
   const [stage, setStage] = useState('init'); // init | fetching | rendering | ready | error
   const [error, setError] = useState(null);
@@ -62,6 +101,9 @@ export default function DicomViewerPage() {
   const [windowCenter, setWindowCenter] = useState(40);
   const [windowWidth,  setWindowWidth]  = useState(400);
   const [invert, setInvert] = useState(false);
+  const [activeTool, setActiveTool] = useState('zoom');
+  // rotation in degrees (0/90/180/270) + flips, applied via setViewPresentation
+  const [orientation, setOrientation] = useState({ rotation: 0, flipH: false, flipV: false });
 
   const viewportContainerRef = useRef(null);
   const renderingEngineRef = useRef(null);
@@ -75,6 +117,17 @@ export default function DicomViewerPage() {
       setStage('fetching');
       setError(null);
       try {
+        // Shared session: the token was already validated server-side and
+        // the payload carries pre-signed URLs — no Supabase auth needed.
+        if (shareKey) {
+          if (!sharePayload) throw new Error(SHARE_EXPIRED_MESSAGE);
+          const dicoms = shareDicomFiles(sharePayload);
+          if (dicoms.length === 0) throw new Error('This shared study has no DICOM files.');
+          if (cancelled) return;
+          setImageIds(dicoms.map((f) => imageIdFromSignedUrl(f.url)));
+          setInstanceIdx(0);
+          return;
+        }
         if (!isDemo) {
           const { data: { session } } = await supabase.auth.getSession();
           if (!session) {
@@ -107,7 +160,7 @@ export default function DicomViewerPage() {
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileId, filePath, studyId, isDemo]);
+  }, [fileId, filePath, studyId, isDemo, shareKey, sharePayload]);
 
   // Initialise Cornerstone + create viewport once imageIds resolved
   useEffect(() => {
@@ -153,28 +206,23 @@ export default function DicomViewerPage() {
           cornerstoneTools.PanTool,
           cornerstoneTools.ZoomTool,
           cornerstoneTools.StackScrollTool,
+          cornerstoneTools.LengthTool,
+          cornerstoneTools.AngleTool,
+          cornerstoneTools.BidirectionalTool,
+          cornerstoneTools.ProbeTool,
+          cornerstoneTools.EllipticalROITool,
+          cornerstoneTools.RectangleROITool,
         ];
-        for (const T of tools) cornerstoneTools.addTool(T);
+        // addTool throws if a tool is already registered globally (e.g. a
+        // previous mount of this page in the same window).
+        for (const T of tools) {
+          try { cornerstoneTools.addTool(T); } catch { /* already added */ }
+        }
+        for (const T of tools) toolGroup.addTool(T.toolName);
 
-        toolGroup.addTool(cornerstoneTools.WindowLevelTool.toolName);
-        toolGroup.addTool(cornerstoneTools.PanTool.toolName);
-        toolGroup.addTool(cornerstoneTools.ZoomTool.toolName);
-        toolGroup.addTool(cornerstoneTools.StackScrollTool.toolName);
-
-        // Mouse bindings — radiology convention:
-        //   right-drag  = window/level
-        //   middle-drag = pan
-        //   wheel       = stack scroll
-        //   left-drag   = zoom (closer to dental-CAD; user-overridable later)
-        toolGroup.setToolActive(cornerstoneTools.WindowLevelTool.toolName, {
-          bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Secondary }],
-        });
-        toolGroup.setToolActive(cornerstoneTools.PanTool.toolName, {
-          bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Auxiliary }],
-        });
-        toolGroup.setToolActive(cornerstoneTools.ZoomTool.toolName, {
-          bindings: [{ mouseButton: cornerstoneTools.Enums.MouseBindings.Primary }],
-        });
+        // Wheel always scrolls the stack; the left/right/middle bindings are
+        // owned by the activeTool effect below (radiology convention:
+        // right-drag = W/L, middle-drag = pan, left-drag = selected tool).
         toolGroup.setToolActive(cornerstoneTools.StackScrollTool.toolName);
 
         toolGroup.addViewport(VIEWPORT_ID, RENDERING_ENGINE_ID);
@@ -202,7 +250,8 @@ export default function DicomViewerPage() {
             const imagePlane    = cornerstone.metaData.get('imagePlaneModule', imageId)    || {};
             setImageMeta({
               patientName:  formatPatientName(patient.patientName),
-              patientId:    patient.patientId,
+              // DICOM naming: the patient module exposes `patientID`
+              patientId:    patient.patientID || patient.patientId,
               studyDate:    formatDate(generalStudy.studyDate),
               studyDescription: generalStudy.studyDescription,
               modality:     generalSeries.modality,
@@ -232,6 +281,29 @@ export default function DicomViewerPage() {
     })();
     return () => { cancelled = true; };
   }, [imageIds]);
+
+  // Re-bind mouse buttons whenever the selected left-click tool changes.
+  // setToolActive REPLACES a tool's bindings, so W/L and Pan are re-issued
+  // their secondary/auxiliary bindings on every pass to keep the radiology
+  // convention alive regardless of which tool owns left-drag.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    const toolGroup = cornerstoneTools.ToolGroupManager.getToolGroup(TOOL_GROUP_ID);
+    if (!toolGroup) return;
+    const { MouseBindings } = cornerstoneTools.Enums;
+    const active = leftToolName(activeTool) || leftToolName('zoom');
+    for (const { key } of LEFT_TOOLS) {
+      const name = leftToolName(key);
+      const bindings = [];
+      if (name === active) bindings.push({ mouseButton: MouseBindings.Primary });
+      if (name === cornerstoneTools.WindowLevelTool.toolName) bindings.push({ mouseButton: MouseBindings.Secondary });
+      if (name === cornerstoneTools.PanTool.toolName) bindings.push({ mouseButton: MouseBindings.Auxiliary });
+      try {
+        if (bindings.length > 0) toolGroup.setToolActive(name, { bindings });
+        else toolGroup.setToolPassive(name);
+      } catch { /* tool not in group */ }
+    }
+  }, [stage, activeTool]);
 
   // Sync slice slider -> viewport
   const onSliceChange = useCallback((idx) => {
@@ -272,11 +344,45 @@ export default function DicomViewerPage() {
     setInvert(next);
   }, [invert]);
 
+  // Rotation + flips ride on the viewport's ViewPresentation (Cornerstone3D
+  // 4.x); resetCamera alone doesn't clear them, so reset re-issues zeros.
+  const applyOrientation = useCallback((next) => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    vp.setViewPresentation({
+      rotation: next.rotation,
+      flipHorizontal: next.flipH,
+      flipVertical: next.flipV,
+    });
+    vp.render();
+    setOrientation(next);
+  }, []);
+
+  const rotateBy = useCallback((deg) => {
+    applyOrientation({ ...orientation, rotation: (orientation.rotation + deg + 360) % 360 });
+  }, [applyOrientation, orientation]);
+
+  const toggleFlip = useCallback((axis) => {
+    applyOrientation({ ...orientation, [axis]: !orientation[axis] });
+  }, [applyOrientation, orientation]);
+
+  const clearAnnotations = useCallback(() => {
+    try {
+      cornerstoneTools.annotation?.state?.removeAllAnnotations?.();
+    } catch (e) {
+      console.warn('[dicom] clearAnnotations failed:', e?.message);
+    }
+    renderingEngineRef.current?.render();
+  }, []);
+
   const resetView = useCallback(() => {
     if (!viewportRef.current) return;
     viewportRef.current.resetCamera();
     viewportRef.current.resetProperties();
+    viewportRef.current.setViewPresentation({ rotation: 0, flipHorizontal: false, flipVertical: false });
     viewportRef.current.render();
+    setOrientation({ rotation: 0, flipH: false, flipV: false });
+    setInvert(false);
   }, []);
 
   const saveScreenshot = useCallback(() => {
@@ -310,7 +416,30 @@ export default function DicomViewerPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [imageIds.length, instanceIdx, onSliceChange]);
 
+  // Tool hotkeys: 1-9 select the left-click tool, R = reset, I = invert.
+  useEffect(() => {
+    if (stage !== 'ready') return;
+    const onKey = (e) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const byHotkey = LEFT_TOOLS.find((t) => t.hotkey === e.key);
+      if (byHotkey) {
+        e.preventDefault();
+        setActiveTool(byHotkey.key);
+      } else if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        resetView();
+      } else if (e.key === 'i' || e.key === 'I') {
+        e.preventDefault();
+        toggleInvert();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [stage, resetView, toggleInvert]);
+
   const presets = WL_PRESETS_BY_MODALITY[imageMeta?.modality] || WL_PRESETS_BY_MODALITY.DEFAULT;
+  const activeToolLabel = LEFT_TOOLS.find((t) => t.key === activeTool)?.label.replace(/ \(\d\)$/, '') || 'Zoom';
 
   return (
     <div className="h-screen w-screen flex flex-col" style={{ backgroundColor: SHELL_BG, color: '#cdd2d8' }}>
@@ -384,7 +513,7 @@ export default function DicomViewerPage() {
             </div>
             <div className="absolute bottom-3 left-3 text-[11px] font-mono pointer-events-none" style={{ color: '#9aa1ab', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
               WC: {Math.round(windowCenter)}  WW: {Math.round(windowWidth)}
-              <span className="ml-3 text-gray-500">left=zoom · right=W/L · wheel=scroll · middle=pan</span>
+              <span className="ml-3 text-gray-500">left={activeToolLabel.toLowerCase()} · right=W/L · wheel=scroll · middle=pan</span>
             </div>
           </>
         )}
@@ -393,9 +522,68 @@ export default function DicomViewerPage() {
       {/* Right rail */}
       {stage === 'ready' && (
         <div
-          className="absolute right-3 top-16 w-60 rounded-lg p-3 z-10 text-xs"
+          className="absolute right-3 top-16 w-60 rounded-lg p-3 z-10 text-xs max-h-[calc(100vh-6rem)] overflow-y-auto"
           style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128' }}
         >
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Tools</div>
+          <div className="grid grid-cols-5 gap-1 mb-3">
+            {LEFT_TOOLS.map(({ key, icon: Icon, label }) => (
+              <button
+                key={key}
+                onClick={() => setActiveTool(key)}
+                title={label}
+                className={`h-8 rounded flex items-center justify-center ${
+                  activeTool === key ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+              >
+                <Icon size={13} />
+              </button>
+            ))}
+            <button
+              onClick={clearAnnotations}
+              title="Clear all measurements"
+              className="h-8 rounded flex items-center justify-center bg-gray-800 hover:bg-red-700 text-gray-300 hover:text-white"
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Orient</div>
+          <div className="grid grid-cols-4 gap-1 mb-3">
+            <button
+              onClick={() => rotateBy(-90)}
+              title="Rotate 90° counter-clockwise"
+              className="h-8 rounded flex items-center justify-center bg-gray-800 hover:bg-gray-700 text-gray-300"
+            >
+              <RotateCcw size={13} />
+            </button>
+            <button
+              onClick={() => rotateBy(90)}
+              title="Rotate 90° clockwise"
+              className="h-8 rounded flex items-center justify-center bg-gray-800 hover:bg-gray-700 text-gray-300"
+            >
+              <RotateCw size={13} />
+            </button>
+            <button
+              onClick={() => toggleFlip('flipH')}
+              title="Flip horizontal"
+              className={`h-8 rounded flex items-center justify-center ${
+                orientation.flipH ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+              }`}
+            >
+              <FlipHorizontal size={13} />
+            </button>
+            <button
+              onClick={() => toggleFlip('flipV')}
+              title="Flip vertical"
+              className={`h-8 rounded flex items-center justify-center ${
+                orientation.flipV ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+              }`}
+            >
+              <FlipVertical size={13} />
+            </button>
+          </div>
+
           {presets.length > 0 && (
             <>
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Presets</div>

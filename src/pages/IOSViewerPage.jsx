@@ -26,6 +26,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, Link, useNavigate, useLocation } from 'react-router-dom';
 import { Loader2, AlertCircle, ArrowLeft, ExternalLink, GitCompare, X } from 'lucide-react';
 import { resolveSignedUrl, resolveStudyFiles } from '../lib/signedUrl';
+import { readSharePayload, shareMeshFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
 import { ModelViewer } from '../components/ios-viewer/ModelViewer';
 import { supabase } from '../lib/supabase';
 
@@ -79,10 +80,14 @@ export default function IOSViewerPage() {
   const queryName = searchParams.get('name');
   const fileType = searchParams.get('type') || 'stl';
   const studyId = searchParams.get('study');
-  // Read-only mode for patient portal embeds: hides clinical tools
-  // (measurement, occlusal contact, analysis, mouse settings) while
-  // keeping orbit, zoom, pan, layer toggles, and view presets.
-  const readOnly = searchParams.get('readonly') === '1' || searchParams.get('mode') === 'patient';
+  // Tokenized share flow: SharedViewerPage validated the token server-side
+  // and stashed the resolved payload (signed URLs) in sessionStorage.
+  const shareKey = searchParams.get('share');
+  const sharePayload = useMemo(() => readSharePayload(shareKey), [shareKey]);
+  // Read-only mode for patient portal embeds + shared sessions: hides
+  // clinical tools (measurement, occlusal contact, analysis, mouse
+  // settings) while keeping orbit, zoom, pan, layer toggles, view presets.
+  const readOnly = searchParams.get('readonly') === '1' || searchParams.get('mode') === 'patient' || !!shareKey;
 
   // Memoize patient + scan so their object references stay stable across
   // renders. Without this, ModelViewer's `useEffect(..., [scan])` re-runs
@@ -112,6 +117,27 @@ export default function IOSViewerPage() {
       setLoading(true);
       setError(null);
       try {
+        // Shared session: the token was already validated server-side and
+        // the payload carries pre-signed URLs — no Supabase auth needed.
+        if (shareKey) {
+          if (!sharePayload) throw new Error(SHARE_EXPIRED_MESSAGE);
+          const meshes = shareMeshFiles(sharePayload);
+          if (meshes.length === 0) throw new Error('This shared study has no 3D scan files.');
+          if (cancelled) return;
+          setFiles(meshes.map((f) => ({
+            url: f.url,
+            fileName: f.fileName,
+            fileType: f.fileKind,
+          })));
+          setFileUrl(null);
+          setFileName(`Case · ${meshes.length} scan${meshes.length !== 1 ? 's' : ''}`);
+          setHud({
+            patientName: sharePayload.study?.patient_name || null,
+            studyDate:   sharePayload.study?.study_date || null,
+            studyType:   sharePayload.study?.study_type || null,
+          });
+          return;
+        }
         // Auth gate — non-demo paths read RLS-protected tables. If there's
         // no session, bounce to /login with a return path so the user lands
         // back here after signing in.
@@ -177,7 +203,7 @@ export default function IOSViewerPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [fileId, filePath, queryName, isDemo, studyId]);
+  }, [fileId, filePath, queryName, isDemo, studyId, shareKey, sharePayload]);
 
   if (loading) {
     return (

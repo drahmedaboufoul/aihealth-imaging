@@ -23,7 +23,7 @@
  * user asked for.
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useSearchParams, useNavigate, useLocation } from 'react-router-dom';
 import {
   Loader2, AlertCircle, ArrowLeft, Box,
@@ -43,6 +43,7 @@ import {
   cornerstone,
   cornerstoneTools,
 } from '../lib/cornerstoneInit';
+import { readSharePayload, shareDicomFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
 import { supabase } from '../lib/supabase';
 
 const SHELL_BG = '#0b0d10';
@@ -759,6 +760,14 @@ export default function CBCTViewerPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const studyId = searchParams.get('study');
+  // Tokenized share flow: SharedViewerPage validated the token server-side
+  // and stashed the resolved payload (signed URLs + saved annotations) in
+  // sessionStorage. In share mode we skip the Supabase auth gate and all
+  // DB reads/writes — everything renders from the payload, read-only.
+  const shareKey = searchParams.get('share');
+  const sharePayload = useMemo(() => readSharePayload(shareKey), [shareKey]);
+  const readOnly = searchParams.get('readonly') === '1' || !!shareKey;
+  const effectiveStudyId = studyId || sharePayload?.study?.id || null;
 
   const [stage, setStage] = useState('init'); // init | resolving | loading-volume | ready | error
   const [error, setError] = useState(null);
@@ -869,14 +878,19 @@ export default function CBCTViewerPage() {
 
     (async () => {
       try {
-        if (!studyId) {
+        if (shareKey && !sharePayload) {
+          throw new Error(SHARE_EXPIRED_MESSAGE);
+        }
+        if (!effectiveStudyId) {
           throw new Error('Missing ?study=<imaging_studies.id> URL parameter.');
         }
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!session) {
-          const back = encodeURIComponent(location.pathname + location.search);
-          navigate(`/login?next=${back}`, { replace: true });
-          return;
+        if (!sharePayload) {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (!session) {
+            const back = encodeURIComponent(location.pathname + location.search);
+            navigate(`/login?next=${back}`, { replace: true });
+            return;
+          }
         }
         if (cancelled) return;
 
@@ -887,11 +901,16 @@ export default function CBCTViewerPage() {
         // single-file path. Geometry is baked into the header — no IPP
         // guesswork, no scanner-quirk landmines. Falls through to the
         // DICOM streaming path if no NIfTI is available yet.
+        // Share mode: the resolve API already signed the NIfTI URL.
         let niftiInfo = { url: null, status: null, error: null };
-        try {
-          niftiInfo = await resolveStudyNiftiVolume(studyId);
-        } catch (e) {
-          console.warn('[cbct] resolveStudyNiftiVolume failed (will fall back to DICOM):', e?.message);
+        if (sharePayload) {
+          niftiInfo = { url: sharePayload.niftiUrl || null, status: sharePayload.niftiUrl ? 'ready' : null, error: null };
+        } else {
+          try {
+            niftiInfo = await resolveStudyNiftiVolume(studyId);
+          } catch (e) {
+            console.warn('[cbct] resolveStudyNiftiVolume failed (will fall back to DICOM):', e?.message);
+          }
         }
         if (cancelled) return;
 
@@ -910,7 +929,7 @@ export default function CBCTViewerPage() {
           await initCornerstone();
           if (cancelled) return;
 
-          const volumeId = `cornerstoneVolume:nifti-${studyId}`;
+          const volumeId = `cornerstoneVolume:nifti-${effectiveStudyId}`;
           await renderFromNifti({
             niftiUrl: niftiInfo.url,
             volumeId,
@@ -938,7 +957,9 @@ export default function CBCTViewerPage() {
           console.warn('[cbct] NIfTI conversion failed for this study, falling back to DICOM:', niftiInfo.error);
         }
 
-        const list = await resolveStudyDicomFiles(studyId);
+        const list = sharePayload
+          ? shareDicomFiles(sharePayload)
+          : await resolveStudyDicomFiles(studyId);
         if (cancelled) return;
         if (list.length < 3) {
           throw new Error(
@@ -950,7 +971,7 @@ export default function CBCTViewerPage() {
         if (cancelled) return;
 
         const imageIds = list.map((f) => imageIdFromSignedUrl(f.url));
-        const volumeId = `cornerstoneStreamingImageVolume:study-${studyId}`;
+        const volumeId = `cornerstoneStreamingImageVolume:study-${effectiveStudyId}`;
 
         setStage('loading-volume');
 
@@ -1311,7 +1332,7 @@ export default function CBCTViewerPage() {
     })();
 
     return () => { cancelled = true; };
-  }, [studyId, navigate, location.pathname, location.search]);
+  }, [studyId, shareKey, sharePayload, effectiveStudyId, navigate, location.pathname, location.search]);
 
   const applyPreset = (preset) => {
     const engine = enginRef.current;
@@ -1427,7 +1448,7 @@ export default function CBCTViewerPage() {
   // the inference service directly (internal-key never leaves server);
   // it POSTs to the EMR's /api/ai-infer route which forwards.
   const runAiInference = useCallback(async (modelKey) => {
-    if (!studyId) return;
+    if (!studyId || readOnly) return;
     setAiRunning((r) => ({ ...r, [modelKey]: true }));
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -1468,7 +1489,7 @@ export default function CBCTViewerPage() {
     } finally {
       setAiRunning((r) => ({ ...r, [modelKey]: false }));
     }
-  }, [studyId]);
+  }, [studyId, readOnly]);
 
   // Promote the current implant plan into a formal treatment_plans row
   // in the EMR. Looks up the study's patient + clinic, generates a
@@ -1541,7 +1562,7 @@ export default function CBCTViewerPage() {
   }, [studyId, implants, promoteTitle, promoteFeePerImplant, nervePoints, safetyZoneMM]);
 
   const handleSaveMeasurements = useCallback(async () => {
-    if (!studyId) return;
+    if (!studyId || readOnly) return;
     try {
       const all = cornerstoneTools.annotation?.state?.getAllAnnotations?.() || [];
       const serialized = all.map((a) => ({
@@ -1581,21 +1602,28 @@ export default function CBCTViewerPage() {
       console.warn('[cbct] save annotations failed:', e?.message);
       alert(`Save failed: ${e?.message || e}`);
     }
-  }, [studyId, archPoints, archSlabMM, nervePoints, safetyZoneMM, implants]);
+  }, [studyId, readOnly, archPoints, archSlabMM, nervePoints, safetyZoneMM, implants]);
 
   // Auto-load saved annotations once the viewer is ready (best-effort).
+  // Share mode: the resolve API already returned viewer_annotations in the
+  // payload — no DB read (an anonymous recipient has no RLS access anyway).
   useEffect(() => {
-    if (stage !== 'ready' || !studyId) return;
+    if (stage !== 'ready' || (!studyId && !sharePayload)) return;
     let cancelled = false;
     (async () => {
       try {
-        const { data } = await supabase
-          .from('imaging_studies')
-          .select('viewer_annotations')
-          .eq('id', studyId)
-          .maybeSingle();
-        if (cancelled) return;
-        const saved = data?.viewer_annotations;
+        let saved = null;
+        if (sharePayload) {
+          saved = sharePayload.viewer_annotations;
+        } else {
+          const { data } = await supabase
+            .from('imaging_studies')
+            .select('viewer_annotations')
+            .eq('id', studyId)
+            .maybeSingle();
+          if (cancelled) return;
+          saved = data?.viewer_annotations;
+        }
         if (!saved) return;
         // Two shapes supported:
         //   v1 (legacy): array of annotations
@@ -1648,7 +1676,7 @@ export default function CBCTViewerPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [stage, studyId]);
+  }, [stage, studyId, sharePayload]);
 
   // ── Display toggles ─────────────────────────────────────────────────
   // Invert image — flips greyscale (negative). Useful for highlighting
@@ -2124,6 +2152,11 @@ export default function CBCTViewerPage() {
           <div className="text-sm font-semibold tracking-wide flex items-center gap-2">
             <Box size={14} className="text-amber-500" />
             CBCT Viewer
+            {readOnly && (
+              <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-300 border border-amber-700/60">
+                Read-only
+              </span>
+            )}
           </div>
         </div>
 
@@ -2177,7 +2210,9 @@ export default function CBCTViewerPage() {
               <ToolButton active={activeTool === 'pan'}  onClick={() => selectTool('pan')}  icon={Move}   label="Pan (6)" />
               <ToolButton active={activeTool === 'zoom'} onClick={() => selectTool('zoom')} icon={ZoomIn} label="Zoom (7)" />
               <ToolButton active={false} onClick={handleResetViews}        icon={RotateCcw} label="Reset (R)" />
-              <ToolButton active={false} onClick={handleSaveMeasurements}  icon={Save}      label="Save measurements" />
+              {!readOnly && (
+                <ToolButton active={false} onClick={handleSaveMeasurements} icon={Save} label="Save measurements" />
+              )}
               <ToolButton active={false} onClick={handleClearMeasurements} icon={Trash2}    label="Clear annotations" danger />
             </div>
 
@@ -2318,13 +2353,15 @@ export default function CBCTViewerPage() {
                       );
                     })}
                   </div>
-                  <button
-                    onClick={() => { setPromoteResult(null); setShowPromoteModal(true); }}
-                    className="w-full text-[10px] py-1.5 rounded bg-blue-700 hover:bg-blue-600 text-white flex items-center justify-center gap-1"
-                    title="Create a Treatment Plan in the EMR linked to this study"
-                  >
-                    <ExternalLink size={10} /> Promote to Plan
-                  </button>
+                  {!readOnly && (
+                    <button
+                      onClick={() => { setPromoteResult(null); setShowPromoteModal(true); }}
+                      className="w-full text-[10px] py-1.5 rounded bg-blue-700 hover:bg-blue-600 text-white flex items-center justify-center gap-1"
+                      title="Create a Treatment Plan in the EMR linked to this study"
+                    >
+                      <ExternalLink size={10} /> Promote to Plan
+                    </button>
+                  )}
                   <button
                     onClick={() => setImplants([])}
                     className="w-full text-[10px] py-1 rounded bg-gray-800 hover:bg-red-700 text-gray-300 hover:text-white"
@@ -2389,16 +2426,22 @@ export default function CBCTViewerPage() {
               )}
             </div>
 
-            {/* Section: AI (Phase 4 — surfaces architecture, real models later) */}
-            <SectionHeader>AI · Phase 4</SectionHeader>
-            <div className="grid grid-cols-1 gap-1 mb-2">
-              <button
-                onClick={() => setShowAiModal(true)}
-                className="text-[10px] py-1.5 rounded bg-gray-800 hover:bg-purple-700 text-gray-300 hover:text-white flex items-center justify-center gap-1.5"
-              >
-                <Sparkles size={10} /> AI segmentation
-              </button>
-            </div>
+            {/* Section: AI (Phase 4 — surfaces architecture, real models later).
+                Hidden in shared/read-only sessions: inference needs an authed
+                Supabase JWT and writes results back to the study. */}
+            {!readOnly && (
+              <>
+                <SectionHeader>AI · Phase 4</SectionHeader>
+                <div className="grid grid-cols-1 gap-1 mb-2">
+                  <button
+                    onClick={() => setShowAiModal(true)}
+                    className="text-[10px] py-1.5 rounded bg-gray-800 hover:bg-purple-700 text-gray-300 hover:text-white flex items-center justify-center gap-1.5"
+                  >
+                    <Sparkles size={10} /> AI segmentation
+                  </button>
+                </div>
+              </>
+            )}
 
             {/* Section: Help */}
             <SectionHeader>Shortcuts</SectionHeader>
@@ -2502,16 +2545,18 @@ export default function CBCTViewerPage() {
                   {tracingArch ? 'Tracing — click on axial' : 'Trace Arch'}
                 </button>
 
-                {/* AI auto-trace */}
-                <button
-                  onClick={() => runAiInference('arch-curve')}
-                  disabled={archAiRunning || !!aiRunning['arch-curve']}
-                  className="w-full text-[10px] py-1.5 rounded bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white flex items-center justify-center gap-1.5"
-                  title="AI auto-traces the dental arch"
-                >
-                  <Sparkles size={10} />
-                  {aiRunning['arch-curve'] ? 'AI running…' : 'AI auto-trace'}
-                </button>
+                {/* AI auto-trace — needs an authed session; hidden on shares */}
+                {!readOnly && (
+                  <button
+                    onClick={() => runAiInference('arch-curve')}
+                    disabled={archAiRunning || !!aiRunning['arch-curve']}
+                    className="w-full text-[10px] py-1.5 rounded bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white flex items-center justify-center gap-1.5"
+                    title="AI auto-traces the dental arch"
+                  >
+                    <Sparkles size={10} />
+                    {aiRunning['arch-curve'] ? 'AI running…' : 'AI auto-trace'}
+                  </button>
+                )}
 
                 <div className="flex items-center justify-between pt-1 border-t border-gray-800">
                   <span className="text-gray-400">Arch points</span>

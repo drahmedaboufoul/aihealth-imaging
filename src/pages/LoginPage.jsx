@@ -73,6 +73,7 @@ export default function LoginPage() {
         }}
       >
         <div className="text-center mb-2">
+          <img src="/aihealth-mark.png" alt="aiHealth" width="48" height="48" className="mx-auto mb-2 h-12 w-12 object-contain" />
           <div className="text-[11px] font-bold uppercase tracking-widest text-accent">aiHealth</div>
           <h1 className="text-lg font-semibold text-text mt-1">Imaging — Sign in</h1>
           <p className="text-[11px] text-muted mt-1">Use your aiHealth EMR credentials.</p>

@@ -1393,7 +1393,10 @@ export default function CBCTViewerPage() {
     const engine = enginRef.current;
     if (!engine) return;
     for (const id of MPR_VIEWPORT_IDS) {
+      // Non-MPR view modes (ceph/pano/crosssec/tmj) tear these viewports
+      // down — applying a preset there must not throw.
       const vp = engine.getViewport(id);
+      if (!vp) continue;
       vp.setProperties({ voiRange: { lower: preset.wc - preset.ww / 2, upper: preset.wc + preset.ww / 2 } });
     }
     engine.render();

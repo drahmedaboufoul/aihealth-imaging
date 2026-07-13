@@ -39,6 +39,13 @@ describe('shareUrlForToken', () => {
     vi.stubGlobal('window', { location: { origin: 'https://imaging.example.com' } });
     expect(shareUrlForToken('abc123')).toBe('https://imaging.example.com/viewer/share/abc123');
   });
+  it('honors an explicit base (canonical public domain override)', () => {
+    expect(shareUrlForToken('abc123', 'https://imaging.aihealthmc.ae'))
+      .toBe('https://imaging.aihealthmc.ae/viewer/share/abc123');
+  });
+  it('strips a trailing slash on the base', () => {
+    expect(shareUrlForToken('t', 'https://x.ae/')).toBe('https://x.ae/viewer/share/t');
+  });
 });
 
 describe('computeExpiry', () => {

@@ -24,9 +24,24 @@ export function generateToken() {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-export function shareUrlForToken(token) {
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  return `${origin}/viewer/share/${token}`;
+/**
+ * The canonical public base URL that share links are minted on. Prefer an
+ * explicit VITE_PUBLIC_VIEWER_URL (set this to e.g. https://imaging.aihealthmc.ae
+ * so links never point at a Vercel preview host or localhost), then fall back
+ * to the current origin.
+ */
+export function resolveViewerBase() {
+  let env = '';
+  try {
+    env = (import.meta && import.meta.env && import.meta.env.VITE_PUBLIC_VIEWER_URL) || '';
+  } catch { /* import.meta unavailable (non-ESM test env) */ }
+  if (env) return String(env).replace(/\/+$/, '');
+  if (typeof window !== 'undefined' && window.location?.origin) return window.location.origin;
+  return '';
+}
+
+export function shareUrlForToken(token, base = resolveViewerBase()) {
+  return `${String(base).replace(/\/+$/, '')}/viewer/share/${token}`;
 }
 
 export const PERMISSIONS = [

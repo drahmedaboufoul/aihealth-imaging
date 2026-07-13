@@ -32,8 +32,9 @@ import {
   Activity, Trash2, Plus, Save, Sparkles,
   Eye, EyeOff, Contrast, Layers, ChevronRight,
   Square, Circle as CircleIcon, Hexagon, Cylinder,
-  Zap, GitBranch, ExternalLink,
+  Zap, GitBranch, ExternalLink, Share2,
 } from 'lucide-react';
+import ShareInviteDialog from '../components/ShareInviteDialog';
 import { resolveStudyDicomFiles, resolveStudyNiftiVolume } from '../lib/signedUrl';
 import { loadNiftiVolume } from '../lib/niftiLoader';
 import { renderArchPano, renderCrossSection, getVolumeScalarData, densifyArch } from '../lib/archPano';
@@ -800,6 +801,7 @@ export default function CBCTViewerPage() {
   // individually; results either populate viewer state (e.g. nerve
   // polyline → nervePoints) or queue for later display.
   const [showAiModal, setShowAiModal] = useState(false);
+  const [showShareDialog, setShowShareDialog] = useState(false);
   const [aiRunning, setAiRunning] = useState({}); // { 'nerve-canal': true }
   const [aiLastRun, setAiLastRun] = useState({}); // { 'nerve-canal': { ts, result } }
 
@@ -2177,8 +2179,26 @@ export default function CBCTViewerPage() {
           ))}
         </div>
 
-        <div className="text-[11px] text-gray-500">Cornerstone3D v4</div>
+        <div className="flex items-center gap-3">
+          {stage === 'ready' && studyId && !readOnly && (
+            <button
+              onClick={() => setShowShareDialog(true)}
+              className="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-amber-600 hover:text-white flex items-center gap-1.5"
+              title="Create a share link for this study"
+            >
+              <Share2 size={12} /> Share
+            </button>
+          )}
+          <span className="text-[11px] text-gray-500">Cornerstone3D v4</span>
+        </div>
       </div>
+
+      {showShareDialog && studyId && (
+        <ShareInviteDialog
+          studyId={studyId}
+          onClose={() => setShowShareDialog(false)}
+        />
+      )}
 
       {/* Body: left toolbox | 4-panel grid | right info rail */}
       <div className="flex-1 flex relative">

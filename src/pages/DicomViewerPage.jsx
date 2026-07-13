@@ -20,8 +20,9 @@ import {
   Loader2, AlertCircle, ArrowLeft, Sun, RotateCcw, RotateCw, Camera,
   Contrast, Move, ZoomIn, Ruler, Triangle, Plus, Activity,
   Square, Circle as CircleIcon, Trash2, FlipHorizontal, FlipVertical,
-  Sparkles, X as XIcon,
+  Sparkles, X as XIcon, Share2,
 } from 'lucide-react';
+import ShareInviteDialog from '../components/ShareInviteDialog';
 import { resolveSignedUrl, resolveStudyDicomFiles } from '../lib/signedUrl';
 import { initCornerstone, imageIdFromSignedUrl, cornerstone, cornerstoneTools } from '../lib/cornerstoneInit';
 import { formatPatientName, formatDate } from '../lib/dicomFormat';
@@ -121,6 +122,7 @@ export default function DicomViewerPage() {
   const [activeFinding, setActiveFinding] = useState(null); // index or null
   const [boxTick, setBoxTick] = useState(0); // bump to re-project boxes on camera move
   const overlayLayerRef = useRef(null);
+  const [showShareDialog, setShowShareDialog] = useState(false);
 
   const viewportContainerRef = useRef(null);
   const renderingEngineRef = useRef(null);
@@ -566,10 +568,27 @@ export default function DicomViewerPage() {
           DICOM Viewer
           {imageIds.length > 1 && <span className="ml-2 text-[11px] text-gray-400 font-normal">({imageIds.length} slices)</span>}
         </div>
-        <div className="text-[11px] text-gray-500">
-          Powered by Cornerstone3D
+        <div className="flex items-center gap-3">
+          {stage === 'ready' && studyId && !readOnly && (
+            <button
+              onClick={() => setShowShareDialog(true)}
+              className="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-amber-600 hover:text-white flex items-center gap-1.5"
+              title="Create a share link for this study"
+            >
+              <Share2 size={12} /> Share
+            </button>
+          )}
+          <span className="text-[11px] text-gray-500">Powered by Cornerstone3D</span>
         </div>
       </div>
+
+      {showShareDialog && studyId && (
+        <ShareInviteDialog
+          studyId={studyId}
+          patientName={imageMeta?.patientName}
+          onClose={() => setShowShareDialog(false)}
+        />
+      )}
 
       <div className="flex-1 flex relative">
         {/* Loading overlay */}

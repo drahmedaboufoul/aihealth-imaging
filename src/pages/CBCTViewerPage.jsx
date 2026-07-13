@@ -32,7 +32,7 @@ import {
   Activity, Trash2, Plus, Save, Sparkles,
   Eye, EyeOff, Contrast, Layers, ChevronRight,
   Square, Circle as CircleIcon, Hexagon, Cylinder,
-  Zap, GitBranch, ExternalLink, Share2,
+  Zap, GitBranch, ExternalLink, Share2, Radio, Users,
 } from 'lucide-react';
 import ShareInviteDialog from '../components/ShareInviteDialog';
 import { resolveStudyDicomFiles, resolveStudyNiftiVolume } from '../lib/signedUrl';
@@ -45,7 +45,10 @@ import {
   cornerstoneTools,
 } from '../lib/cornerstoneInit';
 import { readSharePayload, shareDicomFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
-import { supabase } from '../lib/supabase';
+import { supabase, SUPABASE_URL, SUPABASE_ANON_KEY } from '../lib/supabase';
+import { useViewerRoom } from '../hooks/useViewerRoom';
+import { serializeCbctState, applyCbctState, cbctRoomId } from '../lib/viewerRoom';
+import { severityColor, typeLabel } from '../lib/aiOverlay';
 
 const SHELL_BG = '#0b0d10';
 const PANEL_BG = '#15181c';
@@ -81,6 +84,23 @@ const VIEWPORTS = [
 // which viewports are MPR (so it doesn't try to draw crosshairs on the 3D
 // panel).
 const MPR_VIEWPORT_IDS = ['CBCT_AXIAL', 'CBCT_CORONAL', 'CBCT_SAGITTAL'];
+
+// Stable lowercase view labels for the ai-read-cbct reader — findings
+// reference the views they were seen in via `view_refs`, so these must be
+// deterministic per viewport id.
+const AI_VIEW_LABELS = {
+  CBCT_AXIAL: 'axial',
+  CBCT_CORONAL: 'coronal',
+  CBCT_SAGITTAL: 'sagittal',
+  CBCT_3D: '3d',
+  CEPH_LAT: 'ceph_lateral',
+  CEPH_PA: 'ceph_pa',
+  PANO_AXIAL: 'axial',
+  TMJ_AX_R: 'tmj_axial_right',
+  TMJ_AX_L: 'tmj_axial_left',
+  TMJ_COR_R: 'tmj_coronal_right',
+  TMJ_COR_L: 'tmj_coronal_left',
+};
 
 /**
  * Implant catalog — generic mainstream sizes across major brands.
@@ -805,6 +825,39 @@ export default function CBCTViewerPage() {
   const [aiRunning, setAiRunning] = useState({}); // { 'nerve-canal': true }
   const [aiLastRun, setAiLastRun] = useState({}); // { 'nerve-canal': { ts, result } }
 
+  // Claude-vision CBCT reading — unlike the Phase-4 segmentation stubs, this
+  // path is live: it captures the panes on screen and POSTs them to the
+  // ai-read-cbct edge function, which returns ranked findings.
+  const [aiReadStage, setAiReadStage]   = useState('idle'); // idle | running | done | error
+  const [aiReadError, setAiReadError]   = useState(null);
+  const [aiReadResult, setAiReadResult] = useState(null); // cbct_reader payload
+
+  // Live co-viewing (same room pattern as DicomViewerPage). Operator = authed
+  // clinician who flips "Go live"; follower = shared/read-only session that
+  // mirrors the operator's view mode / preset / invert / slab. The room is
+  // namespaced ':cbct' so it never collides with a live 2D session on the
+  // same study id.
+  const [goLive, setGoLive] = useState(false);
+  const applyingRemoteRef = useRef(false); // guard so applied frames don't echo
+  const roomRole = readOnly ? 'follower' : (goLive ? 'operator' : null);
+  // Latest local packed frame + latest setter closures — refreshed every
+  // render (below switchViewMode's declaration) so the follower always calls
+  // the current closures, not stale ones captured at subscribe time.
+  const cbctStateRef = useRef(null);
+  const remoteSettersRef = useRef({});
+
+  const onRemoteState = useCallback((frame) => {
+    applyingRemoteRef.current = true;
+    applyCbctState(cbctStateRef.current, frame, remoteSettersRef.current);
+    setTimeout(() => { applyingRemoteRef.current = false; }, 0);
+  }, []);
+
+  const { participants, operatorPresent, operatorName, publish: roomPublish } = useViewerRoom({
+    roomId: effectiveStudyId ? cbctRoomId(effectiveStudyId) : null,
+    role: roomRole,
+    onRemoteState,
+  });
+
   // Phase 3.6.2 — "Promote to Treatment Plan" dialog state.
   // When the user has placed implants, they can promote the planning
   // session into a formal treatment_plans row that flows into the EMR's
@@ -1493,6 +1546,66 @@ export default function CBCTViewerPage() {
     }
   }, [studyId, readOnly]);
 
+  // Run the Claude-vision CBCT reader on the panes currently on screen.
+  // Captures each visible Cornerstone viewport canvas as PNG (plus the
+  // reformatted-pano canvas in Pano view), then POSTs the labeled set to the
+  // ai-read-cbct edge function with the caller's JWT — the function
+  // RLS-checks the study and persists the reading into
+  // imaging_studies.ai_analysis.cbct_reader.
+  const runAiVisionRead = useCallback(async () => {
+    if (!studyId || readOnly) return;
+    setAiReadStage('running');
+    setAiReadError(null);
+    try {
+      const engine = enginRef.current;
+      const cfg = VIEW_MODES[viewMode];
+      const images = [];
+      for (const v of (cfg?.viewports || [])) {
+        try {
+          const canvas = engine?.getViewport(v.id)?.getCanvas?.();
+          const dataUrl = canvas?.toDataURL?.('image/png');
+          if (dataUrl) {
+            images.push({
+              label: AI_VIEW_LABELS[v.id] || v.id.toLowerCase(),
+              data: dataUrl,
+              mediaType: 'image/png',
+            });
+          }
+        } catch { /* pane not capturable — skip it, don't fail the run */ }
+      }
+      if (viewMode === 'pano' && panoCanvasRef.current) {
+        try {
+          const dataUrl = panoCanvasRef.current.toDataURL('image/png');
+          if (dataUrl) images.push({ label: 'panoramic', data: dataUrl, mediaType: 'image/png' });
+        } catch { /* pano not traced yet */ }
+      }
+      if (images.length === 0) {
+        throw new Error('No panes could be captured in this view mode — switch to MPR + 3D and retry.');
+      }
+      const { data: { session } } = await supabase.auth.getSession();
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/ai-read-cbct`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${session?.access_token || ''}`,
+          apikey: SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ study_id: studyId, images }),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(resp.status === 503
+          ? 'AI service not configured on this deployment.'
+          : (body?.error || `AI request failed (${resp.status}).`));
+      }
+      setAiReadResult(body?.cbct_reader || null);
+      setAiReadStage('done');
+    } catch (e) {
+      setAiReadError(e?.message || String(e));
+      setAiReadStage('error');
+    }
+  }, [studyId, readOnly, viewMode]);
+
   // Promote the current implant plan into a formal treatment_plans row
   // in the EMR. Looks up the study's patient + clinic, generates a
   // treatment_items array from the placed implants, and inserts the
@@ -1822,6 +1935,35 @@ export default function CBCTViewerPage() {
     setupCbctToolGroupsForMode(engine, cfg);
     engine.render();
   }, [invert]);
+
+  // ── Live co-viewing wiring ─────────────────────────────────────────
+  // Refresh the follower's setter closures + the current packed frame on
+  // every render (applyPreset/switchViewMode are re-created per render, so a
+  // ref keeps applyCbctState calling the live versions).
+  remoteSettersRef.current = {
+    setViewMode: (m) => { switchViewMode(m); },
+    applyPresetByName: (name) => {
+      const p = presetTable.find((x) => x.name === name);
+      if (p) applyPreset(p);
+    },
+    setInvert,
+    setSlab: setSlabThickness,
+  };
+  cbctStateRef.current = serializeCbctState({
+    mode: viewMode, preset: activePreset, invert, slab: slabThickness,
+  });
+
+  // Operator: broadcast whenever a shared control changes while live. The
+  // hook throttles + dedupes; the first run after "Go live" sends the
+  // current frame so an already-waiting follower syncs immediately.
+  useEffect(() => {
+    if (stage !== 'ready' || roomRole !== 'operator') return;
+    if (applyingRemoteRef.current) return;
+    const s = serializeCbctState({
+      mode: viewMode, preset: activePreset, invert, slab: slabThickness,
+    });
+    if (s) roomPublish(s);
+  }, [stage, roomRole, roomPublish, viewMode, activePreset, invert, slabThickness]);
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
   useEffect(() => {
@@ -2180,14 +2322,36 @@ export default function CBCTViewerPage() {
         </div>
 
         <div className="flex items-center gap-3">
+          {/* Follower: show when an operator is presenting live. */}
+          {stage === 'ready' && readOnly && effectiveStudyId && operatorPresent && (
+            <span className="text-[11px] px-2 py-1 rounded bg-red-900/50 text-red-300 border border-red-700/50 flex items-center gap-1.5">
+              <Radio size={12} className="animate-pulse" /> Following{operatorName ? ` ${operatorName}` : ''} · live
+            </span>
+          )}
+          {/* Operator: Go-live toggle + participant count. */}
           {stage === 'ready' && studyId && !readOnly && (
-            <button
-              onClick={() => setShowShareDialog(true)}
-              className="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-amber-600 hover:text-white flex items-center gap-1.5"
-              title="Create a share link for this study"
-            >
-              <Share2 size={12} /> Share
-            </button>
+            <>
+              <button
+                onClick={() => setGoLive((v) => !v)}
+                className={`text-[11px] px-2 py-1 rounded flex items-center gap-1.5 ${
+                  goLive ? 'bg-red-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
+                }`}
+                title={goLive ? 'Stop the live session' : 'Start a live session — viewers with the share link follow your navigation'}
+              >
+                <Radio size={12} className={goLive ? 'animate-pulse' : ''} />
+                {goLive ? 'Live' : 'Go live'}
+                {goLive && participants > 1 && (
+                  <span className="inline-flex items-center gap-0.5 ml-0.5"><Users size={11} /> {participants}</span>
+                )}
+              </button>
+              <button
+                onClick={() => setShowShareDialog(true)}
+                className="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-amber-600 hover:text-white flex items-center gap-1.5"
+                title="Create a share link for this study"
+              >
+                <Share2 size={12} /> Share
+              </button>
+            </>
           )}
           <span className="text-[11px] text-gray-500">Cornerstone3D v4</span>
         </div>
@@ -2935,7 +3099,8 @@ export default function CBCTViewerPage() {
         </div>
       )}
 
-      {/* AI segmentation modal — Phase 4 roadmap stub */}
+      {/* AI modal — live Claude-vision CBCT reading on top, Phase-4
+          segmentation roadmap stubs below */}
       {showAiModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
@@ -2948,7 +3113,97 @@ export default function CBCTViewerPage() {
           >
             <div className="flex items-center gap-2 mb-3">
               <Sparkles size={18} className="text-purple-400" />
-              <h2 className="text-base font-semibold text-white">AI Segmentation · Phase 4</h2>
+              <h2 className="text-base font-semibold text-white">AI · CBCT</h2>
+            </div>
+
+            {/* Live Claude-vision reading — captures the panes on screen and
+                returns ranked findings. Needs a real study id (the edge
+                function RLS-checks + persists against the study row). */}
+            {studyId && !readOnly && (
+              <div className="rounded border p-3 mb-3 text-xs" style={{ borderColor: '#1d2128' }}>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className="text-gray-200 font-medium flex items-center gap-1.5">
+                    <Sparkles size={12} className="text-purple-400" /> AI read (vision)
+                  </span>
+                  <button
+                    onClick={runAiVisionRead}
+                    disabled={aiReadStage === 'running'}
+                    className="text-[10px] px-2 py-0.5 rounded bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white flex items-center gap-1"
+                  >
+                    {aiReadStage === 'running'
+                      ? <><Loader2 size={10} className="animate-spin" /> Analyzing…</>
+                      : (aiReadResult ? 'Re-analyze' : 'Run')}
+                  </button>
+                </div>
+                <p className="text-gray-500 text-[10px] leading-snug">
+                  Captures the panes currently on screen and asks the CBCT reader for
+                  ranked findings. Switch view mode first to change what the AI sees.
+                </p>
+
+                {aiReadStage === 'error' && (
+                  <p className="text-[10px] text-red-300 mt-2 leading-snug">{aiReadError}</p>
+                )}
+
+                {aiReadStage === 'done' && aiReadResult && (
+                  <>
+                    {(aiReadResult.findings || []).length === 0 ? (
+                      <p className="text-[10px] text-gray-400 mt-2 leading-snug">
+                        No clearly abnormal findings flagged.{aiReadResult.summary ? ` ${aiReadResult.summary}` : ''}
+                      </p>
+                    ) : (
+                      <>
+                        {aiReadResult.summary && (
+                          <p className="text-[10px] text-gray-400 mt-2 leading-snug">{aiReadResult.summary}</p>
+                        )}
+                        <div className="mt-2 space-y-1 max-h-56 overflow-y-auto">
+                          {(aiReadResult.findings || []).map((f, i) => {
+                            const color = severityColor(f.severity);
+                            return (
+                              <div key={i} className="rounded px-1.5 py-1 flex items-start gap-1.5 bg-gray-900">
+                                <span
+                                  className="mt-0.5 text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center shrink-0"
+                                  style={{ backgroundColor: color, color: '#0b0d10' }}
+                                >
+                                  {i + 1}
+                                </span>
+                                <span className="flex-1 min-w-0">
+                                  <span className="flex items-center justify-between gap-1">
+                                    <span className="text-[10.5px] text-gray-200 font-medium truncate">
+                                      {typeLabel(f.type)}{f.tooth ? ` · ${f.tooth}` : ''}{f.region ? ` · ${f.region}` : ''}
+                                    </span>
+                                    <span className="text-[9px] font-mono tabular-nums" style={{ color }}>
+                                      {Math.round((f.confidence || 0) * 100)}%
+                                    </span>
+                                  </span>
+                                  <span className="block text-[9.5px] text-gray-500 leading-snug">{f.description}</span>
+                                  {Array.isArray(f.view_refs) && f.view_refs.length > 0 && (
+                                    <span className="block text-[8.5px] text-gray-600 font-mono mt-0.5">
+                                      seen in: {f.view_refs.join(', ')}
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    )}
+                    {aiReadResult.limitations && (
+                      <p className="text-[9px] text-gray-500 mt-1.5 leading-snug">
+                        Limitations: {aiReadResult.limitations}
+                      </p>
+                    )}
+                    <p className="text-[8.5px] text-gray-600 mt-1.5 leading-tight">
+                      {aiReadResult.disclaimer || 'AI-assisted · verify before use. Not a diagnosis.'}
+                      {aiReadResult.model ? ` (${aiReadResult.model})` : ''}
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">
+              Segmentation models (coming – placeholder service)
             </div>
             <p className="text-gray-400 text-xs leading-relaxed mb-3">
               Server-side AI models for automated dental analysis. The viewer is wired

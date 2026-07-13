@@ -24,7 +24,8 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, Link, useNavigate, useLocation } from 'react-router-dom';
-import { Loader2, AlertCircle, ArrowLeft, ExternalLink, GitCompare, X } from 'lucide-react';
+import { Loader2, AlertCircle, ArrowLeft, ExternalLink, GitCompare, X, Share2 } from 'lucide-react';
+import ShareInviteDialog from '../components/ShareInviteDialog';
 import { resolveSignedUrl, resolveStudyFiles } from '../lib/signedUrl';
 import { readSharePayload, shareMeshFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
 import { ModelViewer } from '../components/ios-viewer/ModelViewer';
@@ -53,6 +54,7 @@ export default function IOSViewerPage() {
   const [comparisonOpacity, setComparisonOpacity] = useState(0.55);
   const [comparisonColor, setComparisonColor] = useState('#22d3ee'); // cyan
   const [showCompareDialog, setShowCompareDialog] = useState(false);
+  const [showShareDialog, setShowShareDialog] = useState(false);
   const [availableStudies, setAvailableStudies] = useState([]);
   const [loadingCompare, setLoadingCompare] = useState(false);
 
@@ -384,6 +386,29 @@ export default function IOSViewerPage() {
           </div>
         </div>
       )}
+      {/* Share button — top-right, below ModelViewer's h-14 topbar so it
+          doesn't collide with the patient HUD. Same invite flow as the
+          DICOM/CBCT viewers; hidden in read-only / demo sessions. */}
+      {!readOnly && !isDemo && studyId && (
+        <div className="absolute top-16 right-3 z-30">
+          <button
+            onClick={() => setShowShareDialog(true)}
+            className="bg-white text-gray-800 text-[11px] font-semibold px-3 py-1.5 rounded-lg shadow-md border border-gray-200 hover:bg-amber-50 hover:border-amber-300 flex items-center gap-1.5"
+            title="Create a share link for this study"
+          >
+            <Share2 size={12} className="text-amber-600" />
+            Share
+          </button>
+        </div>
+      )}
+      {showShareDialog && studyId && (
+        <ShareInviteDialog
+          studyId={studyId}
+          patientName={hud?.patientName}
+          onClose={() => setShowShareDialog(false)}
+        />
+      )}
+
       {/* Compare button + active overlay panel — hidden in read-only patient embed */}
       {!readOnly && !isDemo && studyId && (
         <div className="absolute bottom-3 left-3 z-30">

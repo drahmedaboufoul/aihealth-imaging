@@ -35,6 +35,12 @@ const TYPE_LABELS = {
   widened_pdl: 'Widened PDL',
   furcation_involvement: 'Furcation involvement',
   root_resorption: 'Root resorption',
+  // CBCT-reader vocabulary (ai-read-cbct) — the overlapping slugs above
+  // (impaction, periapical_radiolucency, retained_root, bone_loss) are shared.
+  caries_suspect: 'Caries (suspect)',
+  sinus_involvement: 'Sinus involvement',
+  missing_tooth: 'Missing tooth',
+  supernumerary: 'Supernumerary tooth',
   other: 'Finding',
 };
 

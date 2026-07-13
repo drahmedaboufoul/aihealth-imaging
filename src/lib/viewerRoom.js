@@ -45,7 +45,9 @@ export function packState(raw = {}) {
 export function statesEqual(a, b) {
   if (a === b) return true;
   if (!a || !b) return false;
-  const keys = ['idx', 'invert', 'rotation', 'flipH', 'flipV', 'zoom'];
+  // 2D fields + CBCT fields (mode/preset/slab) — a frame only ever carries
+  // one family, but comparing the union keeps this a single dedupe path.
+  const keys = ['idx', 'invert', 'rotation', 'flipH', 'flipV', 'zoom', 'mode', 'preset', 'slab'];
   for (const k of keys) if (a[k] !== b[k]) return false;
   const voiEq = (!a.voi && !b.voi) || (a.voi && b.voi && a.voi.lower === b.voi.lower && a.voi.upper === b.voi.upper);
   if (!voiEq) return false;
@@ -91,6 +93,14 @@ export function roomChannelName(studyId) {
   return `${ROOM_PREFIX}${studyId}`;
 }
 
+// The CBCT viewer gets its own room per study so a live CBCT session never
+// collides with a simultaneously-live 2D session on the same study id (the
+// packed frames have different shapes).
+export const CBCT_ROOM_SUFFIX = ':cbct';
+export function cbctRoomId(studyId) {
+  return `${studyId}${CBCT_ROOM_SUFFIX}`;
+}
+
 /**
  * Serialize a Cornerstone 2D stack viewport's navigation state into a packed
  * frame. `vp` is any object exposing the subset of the Cornerstone3D
@@ -111,6 +121,47 @@ export function serialize2DState(vp) {
     zoom: pres.zoom,
     pan: pres.pan,
   });
+}
+
+/**
+ * Serialize the CBCT viewer's shared navigation state into a packed frame.
+ * Unlike the 2D frame (a camera continuum), the CBCT frame carries the
+ * discrete controls both sides hold regardless of layout: view mode, W/L
+ * preset name, invert, slab thickness (mm). `mode` doubles as the shape
+ * discriminator — a CBCT frame is never confusable with a 2D one.
+ */
+export function serializeCbctState(raw = {}) {
+  const out = {};
+  if (typeof raw.mode === 'string' && raw.mode) out.mode = raw.mode;
+  if (typeof raw.preset === 'string' && raw.preset) out.preset = raw.preset;
+  if (typeof raw.invert === 'boolean') out.invert = raw.invert;
+  if (Number.isFinite(raw.slab) && raw.slab >= 0) out.slab = round(raw.slab, 1);
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Apply an incoming CBCT frame on the follower by invoking ONLY the setters
+ * for fields that differ from `current` (the follower's own packed state).
+ * Framework-free: `setters` is a bag of callbacks
+ *   { setViewMode, applyPresetByName, setInvert, setSlab }
+ * so the caller decides how each change lands (switchViewMode is async and
+ * rebuilds viewports — we must not call it for no-op frames).
+ */
+export function applyCbctState(current, next, setters = {}) {
+  if (!next) return;
+  const cur = current || {};
+  if (typeof next.mode === 'string' && next.mode !== cur.mode) {
+    setters.setViewMode?.(next.mode);
+  }
+  if (typeof next.preset === 'string' && next.preset !== cur.preset) {
+    setters.applyPresetByName?.(next.preset);
+  }
+  if (typeof next.invert === 'boolean' && next.invert !== cur.invert) {
+    setters.setInvert?.(next.invert);
+  }
+  if (Number.isFinite(next.slab) && next.slab !== cur.slab) {
+    setters.setSlab?.(next.slab);
+  }
 }
 
 /** Apply a packed frame to a 2D stack viewport (the follower side). */

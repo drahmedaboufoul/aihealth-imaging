@@ -4,8 +4,11 @@ import {
   statesEqual,
   throttle,
   roomChannelName,
+  cbctRoomId,
   serialize2DState,
   apply2DState,
+  serializeCbctState,
+  applyCbctState,
 } from '../src/lib/viewerRoom';
 
 describe('packState', () => {
@@ -88,6 +91,78 @@ describe('throttle', () => {
 describe('roomChannelName', () => {
   it('prefixes the study id', () => {
     expect(roomChannelName('abc-123')).toBe('imaging-room:abc-123');
+  });
+});
+
+describe('cbctRoomId', () => {
+  it('namespaces the study id so CBCT never collides with the 2D room', () => {
+    expect(cbctRoomId('abc-123')).toBe('abc-123:cbct');
+    expect(roomChannelName(cbctRoomId('abc-123'))).toBe('imaging-room:abc-123:cbct');
+    expect(roomChannelName(cbctRoomId('abc-123'))).not.toBe(roomChannelName('abc-123'));
+  });
+});
+
+describe('serializeCbctState', () => {
+  it('packs the shared CBCT controls', () => {
+    expect(serializeCbctState({ mode: 'mpr-3d', preset: 'Bone', invert: false, slab: 4.26 }))
+      .toEqual({ mode: 'mpr-3d', preset: 'Bone', invert: false, slab: 4.3 });
+  });
+
+  it('drops empty / non-finite / negative fields', () => {
+    expect(serializeCbctState({ mode: '', preset: 'Bone', slab: NaN, invert: 'yes' }))
+      .toEqual({ preset: 'Bone' });
+    expect(serializeCbctState({ slab: -5 })).toBeNull();
+    expect(serializeCbctState()).toBeNull();
+  });
+
+  it('CBCT frames dedupe via statesEqual (mode/preset/slab tracked)', () => {
+    const a = { mode: 'mpr-3d', preset: 'Bone', invert: false, slab: 0 };
+    expect(statesEqual(a, { ...a })).toBe(true);
+    expect(statesEqual(a, { ...a, mode: 'ceph' })).toBe(false);
+    expect(statesEqual(a, { ...a, preset: 'Soft Tissue' })).toBe(false);
+    expect(statesEqual(a, { ...a, slab: 5 })).toBe(false);
+  });
+});
+
+describe('applyCbctState', () => {
+  const setters = () => ({
+    setViewMode: vi.fn(),
+    applyPresetByName: vi.fn(),
+    setInvert: vi.fn(),
+    setSlab: vi.fn(),
+  });
+
+  it('calls only the setters for fields that changed', () => {
+    const s = setters();
+    const current = { mode: 'mpr-3d', preset: 'Bone', invert: false, slab: 0 };
+    applyCbctState(current, { mode: 'mpr-3d', preset: 'Soft Tissue', invert: false, slab: 6 }, s);
+    expect(s.setViewMode).not.toHaveBeenCalled();
+    expect(s.applyPresetByName).toHaveBeenCalledOnce();
+    expect(s.applyPresetByName).toHaveBeenCalledWith('Soft Tissue');
+    expect(s.setInvert).not.toHaveBeenCalled();
+    expect(s.setSlab).toHaveBeenCalledOnce();
+    expect(s.setSlab).toHaveBeenCalledWith(6);
+  });
+
+  it('is a no-op for an identical frame (echo-safe)', () => {
+    const s = setters();
+    const frame = { mode: 'ceph', preset: 'Bone', invert: true, slab: 3 };
+    applyCbctState({ ...frame }, { ...frame }, s);
+    for (const fn of Object.values(s)) expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('applies everything when there is no current state yet', () => {
+    const s = setters();
+    applyCbctState(null, { mode: 'pano', preset: 'Air', invert: true, slab: 2 }, s);
+    expect(s.setViewMode).toHaveBeenCalledWith('pano');
+    expect(s.applyPresetByName).toHaveBeenCalledWith('Air');
+    expect(s.setInvert).toHaveBeenCalledWith(true);
+    expect(s.setSlab).toHaveBeenCalledWith(2);
+  });
+
+  it('tolerates null frames and missing setters', () => {
+    expect(() => applyCbctState({ mode: 'mpr-3d' }, null, setters())).not.toThrow();
+    expect(() => applyCbctState(null, { mode: 'ceph', slab: 1 }, {})).not.toThrow();
   });
 });
 

@@ -20,7 +20,7 @@ import {
   Loader2, AlertCircle, ArrowLeft, Sun, RotateCcw, RotateCw, Camera,
   Contrast, Move, ZoomIn, Ruler, Triangle, Plus, Activity,
   Square, Circle as CircleIcon, Trash2, FlipHorizontal, FlipVertical,
-  Sparkles, X as XIcon, Share2,
+  Sparkles, X as XIcon, Share2, Radio, Users,
 } from 'lucide-react';
 import ShareInviteDialog from '../components/ShareInviteDialog';
 import { resolveSignedUrl, resolveStudyDicomFiles } from '../lib/signedUrl';
@@ -28,6 +28,8 @@ import { initCornerstone, imageIdFromSignedUrl, cornerstone, cornerstoneTools } 
 import { formatPatientName, formatDate } from '../lib/dicomFormat';
 import { readSharePayload, shareDicomFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
 import { severityColor, typeLabel, anchorFindingToWorld, projectAnchoredBox } from '../lib/aiOverlay';
+import { serialize2DState, apply2DState } from '../lib/viewerRoom';
+import { useViewerRoom } from '../hooks/useViewerRoom';
 import { supabase, SUPABASE_URL, SUPABASE_ANON_KEY } from '../lib/supabase';
 
 const SHELL_BG = '#0b0d10';
@@ -123,6 +125,46 @@ export default function DicomViewerPage() {
   const [boxTick, setBoxTick] = useState(0); // bump to re-project boxes on camera move
   const overlayLayerRef = useRef(null);
   const [showShareDialog, setShowShareDialog] = useState(false);
+
+  // Live co-viewing. Operator = authed clinician who flips "Go live"; follower
+  // = a shared/read-only session (auto-joins and mirrors when an operator is
+  // live). Room is keyed by the study id, which both sides already hold.
+  const roomStudyId = studyId || sharePayload?.study?.id || null;
+  const [goLive, setGoLive] = useState(false);
+  const applyingRemoteRef = useRef(false); // guard so applied frames don't echo
+  const roomRole = readOnly ? 'follower' : (goLive ? 'operator' : null);
+
+  const onRemoteState = useCallback((s) => {
+    applyingRemoteRef.current = true;
+    apply2DState(viewportRef.current, s);
+    setTimeout(() => { applyingRemoteRef.current = false; }, 0);
+  }, []);
+
+  const { participants, operatorPresent, operatorName, publish: roomPublish } = useViewerRoom({
+    roomId: roomStudyId,
+    role: roomRole,
+    onRemoteState,
+  });
+
+  // Operator: broadcast view state on every camera move while live. The
+  // initial send() lets a follower who is already waiting sync immediately.
+  useEffect(() => {
+    if (stage !== 'ready' || roomRole !== 'operator') return;
+    const el = viewportContainerRef.current;
+    if (!el) return;
+    const send = () => {
+      if (applyingRemoteRef.current) return;
+      const s = serialize2DState(viewportRef.current);
+      if (s) roomPublish(s);
+    };
+    el.addEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED, send);
+    el.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED, send);
+    send();
+    return () => {
+      el.removeEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED, send);
+      el.removeEventListener(cornerstone.Enums.Events.IMAGE_RENDERED, send);
+    };
+  }, [stage, roomRole, roomPublish]);
 
   const viewportContainerRef = useRef(null);
   const renderingEngineRef = useRef(null);
@@ -568,15 +610,37 @@ export default function DicomViewerPage() {
           DICOM Viewer
           {imageIds.length > 1 && <span className="ml-2 text-[11px] text-gray-400 font-normal">({imageIds.length} slices)</span>}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          {/* Follower: show when an operator is presenting live. */}
+          {stage === 'ready' && readOnly && roomStudyId && operatorPresent && (
+            <span className="text-[11px] px-2 py-1 rounded bg-red-900/50 text-red-300 border border-red-700/50 flex items-center gap-1.5">
+              <Radio size={12} className="animate-pulse" /> Following{operatorName ? ` ${operatorName}` : ''} · live
+            </span>
+          )}
+          {/* Operator: Go-live toggle + participant count. */}
           {stage === 'ready' && studyId && !readOnly && (
-            <button
-              onClick={() => setShowShareDialog(true)}
-              className="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-amber-600 hover:text-white flex items-center gap-1.5"
-              title="Create a share link for this study"
-            >
-              <Share2 size={12} /> Share
-            </button>
+            <>
+              <button
+                onClick={() => setGoLive((v) => !v)}
+                className={`text-[11px] px-2 py-1 rounded flex items-center gap-1.5 ${
+                  goLive ? 'bg-red-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
+                }`}
+                title={goLive ? 'Stop the live session' : 'Start a live session — viewers with the share link follow your navigation'}
+              >
+                <Radio size={12} className={goLive ? 'animate-pulse' : ''} />
+                {goLive ? 'Live' : 'Go live'}
+                {goLive && participants > 1 && (
+                  <span className="inline-flex items-center gap-0.5 ml-0.5"><Users size={11} /> {participants}</span>
+                )}
+              </button>
+              <button
+                onClick={() => setShowShareDialog(true)}
+                className="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-amber-600 hover:text-white flex items-center gap-1.5"
+                title="Create a share link for this study"
+              >
+                <Share2 size={12} /> Share
+              </button>
+            </>
           )}
           <span className="text-[11px] text-gray-500">Powered by Cornerstone3D</span>
         </div>

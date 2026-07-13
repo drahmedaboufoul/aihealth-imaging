@@ -20,12 +20,14 @@ import {
   Loader2, AlertCircle, ArrowLeft, Sun, RotateCcw, RotateCw, Camera,
   Contrast, Move, ZoomIn, Ruler, Triangle, Plus, Activity,
   Square, Circle as CircleIcon, Trash2, FlipHorizontal, FlipVertical,
+  Sparkles, X as XIcon,
 } from 'lucide-react';
 import { resolveSignedUrl, resolveStudyDicomFiles } from '../lib/signedUrl';
 import { initCornerstone, imageIdFromSignedUrl, cornerstone, cornerstoneTools } from '../lib/cornerstoneInit';
 import { formatPatientName, formatDate } from '../lib/dicomFormat';
 import { readSharePayload, shareDicomFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
-import { supabase } from '../lib/supabase';
+import { severityColor, typeLabel, anchorFindingToWorld, projectAnchoredBox } from '../lib/aiOverlay';
+import { supabase, SUPABASE_URL, SUPABASE_ANON_KEY } from '../lib/supabase';
 
 const SHELL_BG = '#0b0d10';
 const PANEL_BG = '#15181c';
@@ -92,6 +94,9 @@ export default function DicomViewerPage() {
   // and stashed the resolved payload (signed URLs) in sessionStorage.
   const shareKey = searchParams.get('share');
   const sharePayload = useMemo(() => readSharePayload(shareKey), [shareKey]);
+  // Read-only sessions (shared links / patient embeds) hide write actions
+  // like AI diagnosis, which needs an authed JWT and writes an audit row.
+  const readOnly = searchParams.get('readonly') === '1' || !!shareKey;
 
   const [stage, setStage] = useState('init'); // init | fetching | rendering | ready | error
   const [error, setError] = useState(null);
@@ -104,6 +109,18 @@ export default function DicomViewerPage() {
   const [activeTool, setActiveTool] = useState('zoom');
   // rotation in degrees (0/90/180/270) + flips, applied via setViewPresentation
   const [orientation, setOrientation] = useState({ rotation: 0, flipH: false, flipV: false });
+
+  // AI diagnosis state. aiFindings carry worldCorners (anchored at capture)
+  // so the numbered boxes track anatomy through zoom/pan/rotate.
+  const [aiStage, setAiStage] = useState('idle'); // idle | running | done | error
+  const [aiFindings, setAiFindings] = useState([]);
+  const [aiSummary, setAiSummary] = useState('');
+  const [aiError, setAiError] = useState(null);
+  const [aiModel, setAiModel] = useState(null);
+  const [showAiBoxes, setShowAiBoxes] = useState(true);
+  const [activeFinding, setActiveFinding] = useState(null); // index or null
+  const [boxTick, setBoxTick] = useState(0); // bump to re-project boxes on camera move
+  const overlayLayerRef = useRef(null);
 
   const viewportContainerRef = useRef(null);
   const renderingEngineRef = useRef(null);
@@ -395,6 +412,100 @@ export default function DicomViewerPage() {
     a.click();
   }, []);
 
+  const clearAiFindings = useCallback(() => {
+    setAiFindings([]);
+    setAiSummary('');
+    setAiError(null);
+    setAiModel(null);
+    setActiveFinding(null);
+    setAiStage('idle');
+  }, []);
+
+  // Run the AI radiograph reader on the currently displayed frame. Captures
+  // the viewport canvas as PNG, POSTs it to the ai-read-radiograph edge
+  // function with the caller's JWT, then anchors each returned box to world
+  // coordinates so it tracks the anatomy through later navigation.
+  const runAiDiagnosis = useCallback(async () => {
+    const vp = viewportRef.current;
+    if (!vp || readOnly) return;
+    setAiStage('running');
+    setAiError(null);
+    try {
+      const canvas = vp.getCanvas();
+      const dataUrl = canvas.toDataURL('image/png');
+      // canvasToWorld expects CSS-pixel coordinates; use the element's CSS box.
+      const rect = canvas.getBoundingClientRect();
+      const cw = rect.width || canvas.width;
+      const ch = rect.height || canvas.height;
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const resp = await fetch(
+        `${SUPABASE_URL}/functions/v1/ai-read-radiograph`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${session?.access_token || ''}`,
+            apikey: SUPABASE_ANON_KEY,
+          },
+          body: JSON.stringify({
+            study_id: studyId || undefined,
+            study_type: imageMeta?.modality === 'PANO' ? 'panoramic' : (imageMeta?.modality || 'radiograph'),
+            image: dataUrl,
+            mediaType: 'image/png',
+          }),
+        }
+      );
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const msg = resp.status === 503
+          ? 'AI service not configured on this deployment.'
+          : (body?.error || `AI request failed (${resp.status}).`);
+        setAiError(msg);
+        setAiStage('error');
+        return;
+      }
+      const reader = body?.radiograph_reader || {};
+      const findings = Array.isArray(reader.findings) ? reader.findings : [];
+      // Anchor to world NOW, before any camera change, using the same canvas
+      // size the AI saw.
+      const anchored = findings.map((f) => {
+        try { return anchorFindingToWorld(f, vp, cw, ch); }
+        catch { return f; }
+      });
+      setAiFindings(anchored);
+      setAiSummary(reader.summary || '');
+      setAiModel(reader.model || null);
+      setAiStage('done');
+      setShowAiBoxes(true);
+    } catch (e) {
+      setAiError(e?.message || String(e));
+      setAiStage('error');
+    }
+  }, [readOnly, studyId, imageMeta]);
+
+  // Re-project AI boxes whenever the camera moves (zoom/pan/rotate/flip) so
+  // they stay pinned to anatomy. We just bump a tick; the overlay reads the
+  // live viewport on render.
+  useEffect(() => {
+    if (stage !== 'ready' || aiFindings.length === 0) return;
+    const el = viewportContainerRef.current;
+    if (!el) return;
+    const onCam = () => setBoxTick((t) => (t + 1) % 1000000);
+    el.addEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED, onCam);
+    el.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED, onCam);
+    return () => {
+      el.removeEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED, onCam);
+      el.removeEventListener(cornerstone.Enums.Events.IMAGE_RENDERED, onCam);
+    };
+  }, [stage, aiFindings.length]);
+
+  // Findings belong to one frame — clear them when the user scrolls slices.
+  useEffect(() => {
+    clearAiFindings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instanceIdx]);
+
   // Keyboard slice navigation
   useEffect(() => {
     if (imageIds.length <= 1) return;
@@ -493,6 +604,44 @@ export default function DicomViewerPage() {
           style={{ backgroundColor: SHELL_BG }}
           onContextMenu={(e) => e.preventDefault()}
         />
+
+        {/* AI finding boxes — re-projected from world anchors each camera move.
+            boxTick forces recompute; reading the live viewport keeps them
+            pinned to anatomy through zoom/pan/rotate. */}
+        {stage === 'ready' && showAiBoxes && aiFindings.length > 0 && viewportRef.current && (
+          <div ref={overlayLayerRef} className="absolute inset-0 pointer-events-none z-10" data-tick={boxTick}>
+            {aiFindings.map((f, i) => {
+              const rect = f.worldCorners
+                ? projectAnchoredBox(f.worldCorners, viewportRef.current)
+                : null;
+              if (!rect || rect.width < 2 || rect.height < 2) return null;
+              const color = severityColor(f.severity);
+              const isActive = activeFinding === i;
+              return (
+                <div
+                  key={i}
+                  className="absolute"
+                  style={{
+                    left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+                    border: `2px solid ${color}`,
+                    boxShadow: isActive ? `0 0 0 2px ${color}66, 0 0 12px ${color}88` : 'none',
+                    borderRadius: 3,
+                    transition: 'box-shadow 0.15s',
+                  }}
+                >
+                  <span
+                    className="absolute -top-5 left-0 text-[10px] font-bold px-1.5 py-0.5 rounded pointer-events-auto cursor-pointer"
+                    style={{ backgroundColor: color, color: '#0b0d10' }}
+                    onMouseEnter={() => setActiveFinding(i)}
+                    onMouseLeave={() => setActiveFinding((v) => (v === i ? null : v))}
+                  >
+                    {i + 1}{f.tooth ? ` · ${f.tooth}` : ''}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* HUD overlays — only visible once ready */}
         {stage === 'ready' && imageMeta && (
@@ -679,6 +828,97 @@ export default function DicomViewerPage() {
               <Camera size={11} /> Save
             </button>
           </div>
+
+          {/* AI diagnosis — hidden in read-only / shared sessions (needs an
+              authed JWT + writes an audit row). */}
+          {!readOnly && (
+            <div className="mt-3 pt-3 border-t" style={{ borderColor: '#1d2128' }}>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[10px] uppercase tracking-wider text-gray-400 flex items-center gap-1">
+                  <Sparkles size={11} className="text-purple-400" /> AI diagnosis
+                </span>
+                {aiFindings.length > 0 && (
+                  <button
+                    onClick={() => setShowAiBoxes((v) => !v)}
+                    className="text-[9px] text-gray-500 hover:text-gray-300"
+                    title="Toggle boxes"
+                  >
+                    {showAiBoxes ? 'Hide boxes' : 'Show boxes'}
+                  </button>
+                )}
+              </div>
+
+              <button
+                onClick={runAiDiagnosis}
+                disabled={aiStage === 'running'}
+                className="w-full text-[11px] py-1.5 rounded bg-purple-700 hover:bg-purple-600 disabled:opacity-60 text-white flex items-center justify-center gap-1.5"
+              >
+                {aiStage === 'running'
+                  ? <><Loader2 size={11} className="animate-spin" /> Analyzing…</>
+                  : <><Sparkles size={11} /> {aiFindings.length > 0 ? 'Re-analyze frame' : 'Analyze frame'}</>}
+              </button>
+
+              {aiStage === 'error' && (
+                <p className="text-[10px] text-red-300 mt-2 leading-snug">{aiError}</p>
+              )}
+
+              {aiStage === 'done' && aiFindings.length === 0 && (
+                <p className="text-[10px] text-gray-400 mt-2 leading-snug">
+                  No clearly abnormal findings flagged.{aiSummary ? ` ${aiSummary}` : ''}
+                </p>
+              )}
+
+              {aiFindings.length > 0 && (
+                <>
+                  {aiSummary && (
+                    <p className="text-[10px] text-gray-400 mt-2 leading-snug">{aiSummary}</p>
+                  )}
+                  <div className="mt-2 space-y-1 max-h-56 overflow-y-auto">
+                    {aiFindings.map((f, i) => {
+                      const color = severityColor(f.severity);
+                      return (
+                        <button
+                          key={i}
+                          onMouseEnter={() => setActiveFinding(i)}
+                          onMouseLeave={() => setActiveFinding((v) => (v === i ? null : v))}
+                          className={`w-full text-left rounded px-1.5 py-1 flex items-start gap-1.5 ${
+                            activeFinding === i ? 'bg-gray-800' : 'bg-gray-900 hover:bg-gray-800'
+                          }`}
+                        >
+                          <span
+                            className="mt-0.5 text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center shrink-0"
+                            style={{ backgroundColor: color, color: '#0b0d10' }}
+                          >
+                            {i + 1}
+                          </span>
+                          <span className="flex-1 min-w-0">
+                            <span className="flex items-center justify-between gap-1">
+                              <span className="text-[10.5px] text-gray-200 font-medium truncate">
+                                {typeLabel(f.type)}{f.tooth ? ` · ${f.tooth}` : ''}
+                              </span>
+                              <span className="text-[9px] font-mono tabular-nums" style={{ color }}>
+                                {Math.round(f.confidence * 100)}%
+                              </span>
+                            </span>
+                            <span className="block text-[9.5px] text-gray-500 leading-snug">{f.description}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <button
+                    onClick={clearAiFindings}
+                    className="w-full mt-1.5 text-[9.5px] text-gray-500 hover:text-red-300 flex items-center justify-center gap-1"
+                  >
+                    <XIcon size={9} /> Clear findings
+                  </button>
+                  <p className="text-[8.5px] text-gray-600 mt-1.5 leading-tight">
+                    AI-assisted · verify before use. Not a diagnosis.{aiModel ? ` (${aiModel})` : ''}
+                  </p>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

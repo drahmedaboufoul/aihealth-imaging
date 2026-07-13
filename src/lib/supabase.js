@@ -9,8 +9,8 @@
 
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://bxtqnfylaiimbgjweywi.supabase.co';
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://bxtqnfylaiimbgjweywi.supabase.co';
+export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
 if (!SUPABASE_ANON_KEY) {
   console.warn('[imaging] VITE_SUPABASE_ANON_KEY missing — auth + signed URLs will not work until Vercel env is configured.');

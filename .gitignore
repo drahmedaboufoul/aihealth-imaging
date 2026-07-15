@@ -5,3 +5,12 @@ dist
 .DS_Store
 *.log
 .vercel
+
+# Internal Mavis / competitive-research hygiene (P0.6 scrub)
+# These are Mavis internal skills + competitive research and must NEVER be
+# committed to the public repo. They are scrubbed from history in the
+# `chore/scrub-internal-dirs` PR — re-adding them via .gitignore prevents
+# regression.
+.agents/
+skills-lock.json
+handoff/fussen-report/

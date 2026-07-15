@@ -232,6 +232,18 @@ serve(async (req) => {
       return jsonResponse({ error: "Server not configured (missing SUPABASE_URL / ANTHROPIC_API_KEY)" }, 503);
     }
 
+    // UAE-PHI defang (P0.1 fix): if the operator has set DISABLE_CROSS_BORDER_AI,
+    // refuse to ship any patient image to a non-UAE AI service. The
+    // Open-Generative-AI self-hosted replacement is being integrated; until
+    // that's live, the right behaviour is to STOP THE BLEEDING — refuse the
+    // call rather than leak PHI to Anthropic (US).
+    if (Deno.env.get("DISABLE_CROSS_BORDER_AI") === "true") {
+      return jsonResponse({
+        error: "AI radiograph reading is temporarily disabled (UAE data residency). Use the open-graph self-hosted endpoint or contact the platform team.",
+        code: "CROSS_BORDER_AI_DISABLED",
+      }, 503);
+    }
+
     const body = await req.json().catch(() => null);
     const study_id: string | undefined = body?.study_id || undefined;
     const study_type: string = typeof body?.study_type === "string" ? body.study_type : "radiograph";

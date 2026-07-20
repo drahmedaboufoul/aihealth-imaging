@@ -14,7 +14,7 @@ export default function Shell({ children, title }) {
         <Link to="/" className="flex items-center gap-2 text-text">
           <Activity size={16} className="text-accent" />
           <span className="font-semibold tracking-tight text-[13px]">aiHealth Imaging</span>
-          <span className="text-muted text-[10px] uppercase tracking-[0.1em]">Preview</span>
+          <span className="text-muted text-xs uppercase tracking-[0.1em]">Preview</span>
         </Link>
         {title && (
           <>

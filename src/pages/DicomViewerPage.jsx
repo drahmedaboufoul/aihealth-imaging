@@ -18,11 +18,16 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useSearchParams, useNavigate, useLocation } from 'react-router-dom';
 import {
   Loader2, AlertCircle, ArrowLeft, Sun, RotateCcw, RotateCw, Camera,
-  Contrast, Move, ZoomIn, Ruler, Triangle, Plus, Activity,
-  Square, Circle as CircleIcon, Trash2, FlipHorizontal, FlipVertical,
+  Trash2, FlipHorizontal, FlipVertical,
   Sparkles, X as XIcon, Share2, Radio, Users,
 } from 'lucide-react';
 import ShareInviteDialog from '../components/ShareInviteDialog';
+import MinWidthGuard from '../components/viewer/MinWidthGuard';
+import { ToolButton, ViewerSlider, SectionLabel } from '../components/viewer/controls';
+import { VIEWER_TOKENS } from '../components/viewer/viewerTokens';
+import {
+  DICOM_LEFT_TOOLS, DICOM_DEFAULT_TOOL, SHARED_HOTKEYS,
+} from '../components/viewer/viewerToolConfig';
 import { resolveSignedUrl, resolveStudyDicomFiles } from '../lib/signedUrl';
 import { initCornerstone, imageIdFromSignedUrl, cornerstone, cornerstoneTools } from '../lib/cornerstoneInit';
 import { formatPatientName, formatDate } from '../lib/dicomFormat';
@@ -31,10 +36,6 @@ import { severityColor, typeLabel, anchorFindingToWorld, projectAnchoredBox } fr
 import { serialize2DState, apply2DState } from '../lib/viewerRoom';
 import { useViewerRoom } from '../hooks/useViewerRoom';
 import { supabase, SUPABASE_URL, SUPABASE_ANON_KEY } from '../lib/supabase';
-
-const SHELL_BG = '#0b0d10';
-const PANEL_BG = '#15181c';
-const ACCENT   = '#9C8562';
 
 const RENDERING_ENGINE_ID = 'aihRenderingEngine';
 const VIEWPORT_ID         = 'STACK_VIEWPORT';
@@ -55,21 +56,10 @@ const WL_PRESETS_BY_MODALITY = {
   DEFAULT: [],
 };
 
-// Left-click tool palette. Key → { toolName getter, icon, label, hotkey }.
-// WindowLevel/Pan keep their radiology-convention secondary bindings
-// (right-drag / middle-drag) even while another tool owns left-click.
-const LEFT_TOOLS = [
-  { key: 'zoom',          icon: ZoomIn,     label: 'Zoom (1)',            hotkey: '1' },
-  { key: 'wl',            icon: Contrast,   label: 'Window/Level (2)',    hotkey: '2' },
-  { key: 'pan',           icon: Move,       label: 'Pan (3)',             hotkey: '3' },
-  { key: 'length',        icon: Ruler,      label: 'Length (4)',          hotkey: '4' },
-  { key: 'angle',         icon: Triangle,   label: 'Angle (5)',           hotkey: '5' },
-  { key: 'bidirectional', icon: Plus,       label: 'Bidirectional (6)',   hotkey: '6' },
-  { key: 'probe',         icon: Activity,   label: 'Pixel probe (7)',     hotkey: '7' },
-  { key: 'ellipseROI',    icon: CircleIcon, label: 'Ellipse ROI (8)',     hotkey: '8' },
-  { key: 'rectROI',       icon: Square,     label: 'Rectangle ROI (9)',   hotkey: '9' },
-];
-
+// Left-click tool palette comes from the shared viewerToolConfig (W9) —
+// DICOM_LEFT_TOOLS there. WindowLevel/Pan keep their radiology-convention
+// secondary bindings (right-drag / middle-drag) even while another tool
+// owns left-click.
 function leftToolName(key) {
   const t = cornerstoneTools;
   return {
@@ -109,7 +99,7 @@ export default function DicomViewerPage() {
   const [windowCenter, setWindowCenter] = useState(40);
   const [windowWidth,  setWindowWidth]  = useState(400);
   const [invert, setInvert] = useState(false);
-  const [activeTool, setActiveTool] = useState('zoom');
+  const [activeTool, setActiveTool] = useState(DICOM_DEFAULT_TOOL);
   // rotation in degrees (0/90/180/270) + flips, applied via setViewPresentation
   const [orientation, setOrientation] = useState({ rotation: 0, flipH: false, flipV: false });
 
@@ -353,7 +343,7 @@ export default function DicomViewerPage() {
     if (!toolGroup) return;
     const { MouseBindings } = cornerstoneTools.Enums;
     const active = leftToolName(activeTool) || leftToolName('zoom');
-    for (const { key } of LEFT_TOOLS) {
+    for (const { key } of DICOM_LEFT_TOOLS) {
       const name = leftToolName(key);
       const bindings = [];
       if (name === active) bindings.push({ mouseButton: MouseBindings.Primary });
@@ -571,20 +561,22 @@ export default function DicomViewerPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [imageIds.length, instanceIdx, onSliceChange]);
 
-  // Tool hotkeys: 1-9 select the left-click tool, R = reset, I = invert.
+  // Tool hotkeys: 1-9 select the left-click tool, R = reset, I = invert
+  // (keys shared with the CBCT viewer via SHARED_HOTKEYS).
   useEffect(() => {
     if (stage !== 'ready') return;
     const onKey = (e) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const byHotkey = LEFT_TOOLS.find((t) => t.hotkey === e.key);
+      const byHotkey = DICOM_LEFT_TOOLS.find((t) => t.hotkey === e.key);
+      const lower = e.key.toLowerCase();
       if (byHotkey) {
         e.preventDefault();
         setActiveTool(byHotkey.key);
-      } else if (e.key === 'r' || e.key === 'R') {
+      } else if (lower === SHARED_HOTKEYS.reset) {
         e.preventDefault();
         resetView();
-      } else if (e.key === 'i' || e.key === 'I') {
+      } else if (lower === SHARED_HOTKEYS.invert) {
         e.preventDefault();
         toggleInvert();
       }
@@ -594,26 +586,31 @@ export default function DicomViewerPage() {
   }, [stage, resetView, toggleInvert]);
 
   const presets = WL_PRESETS_BY_MODALITY[imageMeta?.modality] || WL_PRESETS_BY_MODALITY.DEFAULT;
-  const activeToolLabel = LEFT_TOOLS.find((t) => t.key === activeTool)?.label.replace(/ \(\d\)$/, '') || 'Zoom';
+  const activeToolLabel = DICOM_LEFT_TOOLS.find((t) => t.key === activeTool)?.label.replace(/ \(\d\)$/, '') || 'Zoom';
 
   return (
-    <div className="h-screen w-screen flex flex-col" style={{ backgroundColor: SHELL_BG, color: '#cdd2d8' }}>
+    <div className="h-screen w-screen flex flex-col bg-background-primary text-labels-primary">
+      <MinWidthGuard />
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2 border-b" style={{ borderColor: '#1d2128' }}>
-        <button
-          onClick={() => window.close() || navigate('/')}
-          className="text-sm px-2 py-1 rounded hover:bg-white/5 flex items-center gap-1.5"
-        >
-          <ArrowLeft size={14} /> Close
-        </button>
-        <div className="text-sm font-semibold tracking-wide">
-          DICOM Viewer
-          {imageIds.length > 1 && <span className="ml-2 text-[11px] text-gray-400 font-normal">({imageIds.length} slices)</span>}
-        </div>
+      <div className="flex items-center justify-between px-4 py-2 border-b border-separator-s1">
+        {shareKey ? <span className="w-16" aria-hidden="true" /> : (
+          <button
+            onClick={() => window.close() || navigate('/')}
+            className="text-sm px-2 py-1 rounded hover:bg-fills-f1 flex items-center gap-1.5"
+          >
+            <ArrowLeft size={14} /> Close
+          </button>
+        )}
+        {!shareKey && (
+          <div className="text-sm font-semibold tracking-wide">
+            DICOM Viewer
+            {imageIds.length > 1 && <span className="ml-2 text-xs text-labels-tertiary font-normal">({imageIds.length} slices)</span>}
+          </div>
+        )}
         <div className="flex items-center gap-2">
           {/* Follower: show when an operator is presenting live. */}
           {stage === 'ready' && readOnly && roomStudyId && operatorPresent && (
-            <span className="text-[11px] px-2 py-1 rounded bg-red-900/50 text-red-300 border border-red-700/50 flex items-center gap-1.5">
+            <span className="text-xs px-2 py-1 rounded bg-status-danger-soft text-status-danger border border-status-danger/40 flex items-center gap-1.5">
               <Radio size={12} className="animate-pulse" /> Following{operatorName ? ` ${operatorName}` : ''} · live
             </span>
           )}
@@ -622,8 +619,8 @@ export default function DicomViewerPage() {
             <>
               <button
                 onClick={() => setGoLive((v) => !v)}
-                className={`text-[11px] px-2 py-1 rounded flex items-center gap-1.5 ${
-                  goLive ? 'bg-red-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
+                className={`text-xs px-2 py-1 rounded flex items-center gap-1.5 ${
+                  goLive ? 'bg-status-danger text-white' : 'bg-fills-f1 hover:bg-fills-f2 text-labels-primary'
                 }`}
                 title={goLive ? 'Stop the live session' : 'Start a live session — viewers with the share link follow your navigation'}
               >
@@ -635,14 +632,13 @@ export default function DicomViewerPage() {
               </button>
               <button
                 onClick={() => setShowShareDialog(true)}
-                className="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-amber-600 hover:text-white flex items-center gap-1.5"
+                className="text-xs px-2 py-1 rounded bg-fills-f1 text-labels-primary hover:bg-accent hover:text-white flex items-center gap-1.5"
                 title="Create a share link for this study"
               >
                 <Share2 size={12} /> Share
               </button>
             </>
           )}
-          <span className="text-[11px] text-gray-500">Powered by Cornerstone3D</span>
         </div>
       </div>
 
@@ -657,10 +653,10 @@ export default function DicomViewerPage() {
       <div className="flex-1 flex relative">
         {/* Loading overlay */}
         {(stage === 'fetching' || stage === 'rendering') && (
-          <div className="absolute inset-0 flex items-center justify-center z-20" style={{ backgroundColor: 'rgba(11,13,16,0.95)' }}>
+          <div className="absolute inset-0 flex items-center justify-center z-header" style={{ backgroundColor: VIEWER_TOKENS.scrim }}>
             <div className="flex flex-col items-center gap-3">
-              <Loader2 size={28} className="animate-spin text-amber-500" />
-              <p className="text-xs text-gray-400">
+              <Loader2 size={28} className="animate-spin text-accent" />
+              <p className="text-xs text-labels-secondary">
                 {stage === 'fetching' ? 'Resolving signed URLs…' : 'Initialising Cornerstone3D…'}
               </p>
             </div>
@@ -669,11 +665,11 @@ export default function DicomViewerPage() {
 
         {/* Error overlay */}
         {stage === 'error' && (
-          <div className="absolute inset-0 flex items-center justify-center z-30 p-8" style={{ backgroundColor: 'rgba(11,13,16,0.97)' }}>
+          <div className="absolute inset-0 flex items-center justify-center z-header p-8" style={{ backgroundColor: VIEWER_TOKENS.scrimDeep }}>
             <div className="max-w-md text-center">
-              <AlertCircle size={28} className="mx-auto text-red-500 mb-3" />
-              <h2 className="text-sm font-semibold text-white mb-2">Could not load DICOM</h2>
-              <pre className="text-[11px] text-red-300 font-mono whitespace-pre-wrap break-words text-left px-3 py-2 rounded" style={{ backgroundColor: '#1a1d22' }}>
+              <AlertCircle size={28} className="mx-auto text-status-danger mb-3" />
+              <h2 className="text-sm font-semibold text-labels-primary mb-2">Could not load DICOM</h2>
+              <pre className="text-xs text-status-danger font-mono whitespace-pre-wrap break-words text-left px-3 py-2 rounded" style={{ backgroundColor: VIEWER_TOKENS.bgTertiary }}>
                 {error}
               </pre>
             </div>
@@ -684,7 +680,7 @@ export default function DicomViewerPage() {
         <div
           ref={viewportContainerRef}
           className="flex-1 relative"
-          style={{ backgroundColor: SHELL_BG }}
+          style={{ backgroundColor: VIEWER_TOKENS.bgPrimary }}
           onContextMenu={(e) => e.preventDefault()}
         />
 
@@ -692,7 +688,7 @@ export default function DicomViewerPage() {
             boxTick forces recompute; reading the live viewport keeps them
             pinned to anatomy through zoom/pan/rotate. */}
         {stage === 'ready' && showAiBoxes && aiFindings.length > 0 && viewportRef.current && (
-          <div ref={overlayLayerRef} className="absolute inset-0 pointer-events-none z-10" data-tick={boxTick}>
+          <div ref={overlayLayerRef} className="absolute inset-0 pointer-events-none z-header" data-tick={boxTick}>
             {aiFindings.map((f, i) => {
               const rect = f.worldCorners
                 ? projectAnchoredBox(f.worldCorners, viewportRef.current)
@@ -713,8 +709,8 @@ export default function DicomViewerPage() {
                   }}
                 >
                   <span
-                    className="absolute -top-5 left-0 text-[10px] font-bold px-1.5 py-0.5 rounded pointer-events-auto cursor-pointer"
-                    style={{ backgroundColor: color, color: '#0b0d10' }}
+                    className="absolute -top-5 left-0 text-xs font-bold px-1.5 py-0.5 rounded pointer-events-auto cursor-pointer"
+                    style={{ backgroundColor: color, color: VIEWER_TOKENS.bgPrimary }}
                     onMouseEnter={() => setActiveFinding(i)}
                     onMouseLeave={() => setActiveFinding((v) => (v === i ? null : v))}
                   >
@@ -729,23 +725,23 @@ export default function DicomViewerPage() {
         {/* HUD overlays — only visible once ready */}
         {stage === 'ready' && imageMeta && (
           <>
-            <div className="absolute top-3 left-3 text-[11px] leading-tight font-mono pointer-events-none" style={{ color: '#cdd2d8', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
-              {imageMeta.patientName && <div className="text-white">{imageMeta.patientName}</div>}
+            <div className="absolute top-3 left-3 text-xs leading-tight font-mono pointer-events-none" style={{ color: VIEWER_TOKENS.labelPrimary, textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
+              {imageMeta.patientName && <div className="text-labels-primary">{imageMeta.patientName}</div>}
               {imageMeta.patientId && <div>ID: {imageMeta.patientId}</div>}
               {imageMeta.studyDate && <div>{imageMeta.studyDate}</div>}
-              {imageMeta.studyDescription && <div className="text-gray-400">{imageMeta.studyDescription}</div>}
+              {imageMeta.studyDescription && <div className="text-labels-tertiary">{imageMeta.studyDescription}</div>}
             </div>
-            <div className="absolute top-3 right-3 text-[11px] leading-tight font-mono text-right pointer-events-none" style={{ color: '#cdd2d8', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
-              {imageMeta.modality && <div className="text-amber-400 font-semibold">{imageMeta.modality}</div>}
-              {imageMeta.seriesDescription && <div className="text-gray-300">{imageMeta.seriesDescription}</div>}
+            <div className="absolute top-3 right-3 text-xs leading-tight font-mono text-right pointer-events-none" style={{ color: VIEWER_TOKENS.labelPrimary, textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
+              {imageMeta.modality && <div className="text-accent font-semibold">{imageMeta.modality}</div>}
+              {imageMeta.seriesDescription && <div className="text-labels-secondary">{imageMeta.seriesDescription}</div>}
               {imageMeta.rows && imageMeta.columns && <div>{imageMeta.columns}×{imageMeta.rows}</div>}
               {imageIds.length > 1 && (
                 <div>Slice {instanceIdx + 1} / {imageIds.length}</div>
               )}
             </div>
-            <div className="absolute bottom-3 left-3 text-[11px] font-mono pointer-events-none" style={{ color: '#9aa1ab', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
+            <div className="absolute bottom-3 left-3 text-xs font-mono pointer-events-none" style={{ color: VIEWER_TOKENS.labelSecondary, textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
               WC: {Math.round(windowCenter)}  WW: {Math.round(windowWidth)}
-              <span className="ml-3 text-gray-500">left={activeToolLabel.toLowerCase()} · right=W/L · wheel=scroll · middle=pan</span>
+              <span className="ml-3 text-labels-tertiary">left={activeToolLabel.toLowerCase()} · right=W/L · wheel=scroll · middle=pan</span>
             </div>
           </>
         )}
@@ -754,77 +750,62 @@ export default function DicomViewerPage() {
       {/* Right rail */}
       {stage === 'ready' && (
         <div
-          className="absolute right-3 top-16 w-60 rounded-lg p-3 z-10 text-xs max-h-[calc(100vh-6rem)] overflow-y-auto"
-          style={{ backgroundColor: PANEL_BG, border: '1px solid #1d2128' }}
+          className="absolute right-3 top-16 w-60 rounded-lg p-3 z-header text-xs max-h-[calc(100vh-6rem)] overflow-y-auto bg-background-secondary border border-separator-s1"
         >
-          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Tools</div>
+          <SectionLabel className="mb-1.5">Tools</SectionLabel>
           <div className="grid grid-cols-5 gap-1 mb-3">
-            {LEFT_TOOLS.map(({ key, icon: Icon, label }) => (
-              <button
+            {DICOM_LEFT_TOOLS.map(({ key, icon, label }) => (
+              <ToolButton
                 key={key}
+                active={activeTool === key}
                 onClick={() => setActiveTool(key)}
-                title={label}
-                className={`h-8 rounded flex items-center justify-center ${
-                  activeTool === key ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-                }`}
-              >
-                <Icon size={13} />
-              </button>
+                icon={icon}
+                label={label}
+              />
             ))}
-            <button
+            <ToolButton
+              danger
               onClick={clearAnnotations}
-              title="Clear all measurements"
-              className="h-8 rounded flex items-center justify-center bg-gray-800 hover:bg-red-700 text-gray-300 hover:text-white"
-            >
-              <Trash2 size={13} />
-            </button>
+              icon={Trash2}
+              label="Clear all measurements"
+            />
           </div>
 
-          <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Orient</div>
+          <SectionLabel className="mb-1.5">Orient</SectionLabel>
           <div className="grid grid-cols-4 gap-1 mb-3">
-            <button
+            <ToolButton
               onClick={() => rotateBy(-90)}
-              title="Rotate 90° counter-clockwise"
-              className="h-8 rounded flex items-center justify-center bg-gray-800 hover:bg-gray-700 text-gray-300"
-            >
-              <RotateCcw size={13} />
-            </button>
-            <button
+              icon={RotateCcw}
+              label="Rotate 90° counter-clockwise"
+            />
+            <ToolButton
               onClick={() => rotateBy(90)}
-              title="Rotate 90° clockwise"
-              className="h-8 rounded flex items-center justify-center bg-gray-800 hover:bg-gray-700 text-gray-300"
-            >
-              <RotateCw size={13} />
-            </button>
-            <button
+              icon={RotateCw}
+              label="Rotate 90° clockwise"
+            />
+            <ToolButton
+              active={orientation.flipH}
               onClick={() => toggleFlip('flipH')}
-              title="Flip horizontal"
-              className={`h-8 rounded flex items-center justify-center ${
-                orientation.flipH ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-              }`}
-            >
-              <FlipHorizontal size={13} />
-            </button>
-            <button
+              icon={FlipHorizontal}
+              label="Flip horizontal"
+            />
+            <ToolButton
+              active={orientation.flipV}
               onClick={() => toggleFlip('flipV')}
-              title="Flip vertical"
-              className={`h-8 rounded flex items-center justify-center ${
-                orientation.flipV ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-              }`}
-            >
-              <FlipVertical size={13} />
-            </button>
+              icon={FlipVertical}
+              label="Flip vertical"
+            />
           </div>
 
           {presets.length > 0 && (
             <>
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Presets</div>
+              <SectionLabel className="mb-1.5">Presets</SectionLabel>
               <div className="grid grid-cols-2 gap-1 mb-3">
                 {presets.map((p) => (
                   <button
                     key={p.name}
                     onClick={() => applyPreset(p)}
-                    className="text-[11px] py-1.5 rounded bg-gray-800 hover:bg-gray-700"
+                    className="text-xs py-1.5 rounded bg-fills-f1 hover:bg-fills-f2 text-labels-primary"
                   >
                     {p.name}
                   </button>
@@ -833,56 +814,37 @@ export default function DicomViewerPage() {
             </>
           )}
 
-          <div className="mb-2">
-            <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400 mb-1">
-              <span>Window Center</span>
-              <span className="tabular-nums text-gray-300">{Math.round(windowCenter)}</span>
-            </div>
-            <input
-              type="range"
+          <div className="mb-3">
+            <ViewerSlider
+              label="Window Center"
               min={-1000}
               max={3000}
-              step={1}
-              value={windowCenter}
-              onChange={(e) => onWindowChange(Number(e.target.value), windowWidth)}
-              className="w-full"
+              value={Math.round(windowCenter)}
+              onChange={(v) => onWindowChange(v, windowWidth)}
             />
           </div>
 
           <div className="mb-3">
-            <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400 mb-1">
-              <span>Window Width</span>
-              <span className="tabular-nums text-gray-300">{Math.round(windowWidth)}</span>
-            </div>
-            <input
-              type="range"
+            <ViewerSlider
+              label="Window Width"
               min={1}
               max={4000}
-              step={1}
-              value={windowWidth}
-              onChange={(e) => onWindowChange(windowCenter, Number(e.target.value))}
-              className="w-full"
+              value={Math.round(windowWidth)}
+              onChange={(v) => onWindowChange(windowCenter, v)}
             />
           </div>
 
           {imageIds.length > 1 && (
             <div className="mb-3">
-              <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400 mb-1">
-                <span>Slice</span>
-                <span className="tabular-nums text-gray-300">
-                  {instanceIdx + 1} / {imageIds.length}
-                </span>
-              </div>
-              <input
-                type="range"
+              <ViewerSlider
+                label="Slice"
                 min={0}
                 max={imageIds.length - 1}
-                step={1}
                 value={instanceIdx}
-                onChange={(e) => onSliceChange(Number(e.target.value))}
-                className="w-full"
+                unit={` / ${imageIds.length}`}
+                onChange={onSliceChange}
               />
-              <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+              <p className="text-xs text-labels-tertiary mt-1 leading-snug">
                 Wheel scrolls; ↑/↓ one slice; PgUp/PgDn ten.
               </p>
             </div>
@@ -891,21 +853,21 @@ export default function DicomViewerPage() {
           <div className="grid grid-cols-3 gap-1">
             <button
               onClick={resetView}
-              className="text-[11px] py-1.5 rounded bg-gray-800 hover:bg-gray-700 flex items-center justify-center gap-1"
+              className="text-xs py-1.5 rounded bg-fills-f1 hover:bg-fills-f2 text-labels-primary flex items-center justify-center gap-1"
               title="Reset W/L + zoom"
             >
               <RotateCcw size={11} /> Reset
             </button>
             <button
               onClick={toggleInvert}
-              className={`text-[11px] py-1.5 rounded flex items-center justify-center gap-1 ${invert ? 'bg-amber-600' : 'bg-gray-800 hover:bg-gray-700'}`}
+              className={`text-xs py-1.5 rounded flex items-center justify-center gap-1 ${invert ? 'bg-accent text-white' : 'bg-fills-f1 hover:bg-fills-f2 text-labels-primary'}`}
               title="Invert grayscale"
             >
               <Sun size={11} /> Invert
             </button>
             <button
               onClick={saveScreenshot}
-              className="text-[11px] py-1.5 rounded bg-gray-800 hover:bg-gray-700 flex items-center justify-center gap-1"
+              className="text-xs py-1.5 rounded bg-fills-f1 hover:bg-fills-f2 text-labels-primary flex items-center justify-center gap-1"
               title="Download as PNG"
             >
               <Camera size={11} /> Save
@@ -915,15 +877,15 @@ export default function DicomViewerPage() {
           {/* AI diagnosis — hidden in read-only / shared sessions (needs an
               authed JWT + writes an audit row). */}
           {!readOnly && (
-            <div className="mt-3 pt-3 border-t" style={{ borderColor: '#1d2128' }}>
+            <div className="mt-3 pt-3 border-t border-separator-s1">
               <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] uppercase tracking-wider text-gray-400 flex items-center gap-1">
-                  <Sparkles size={11} className="text-purple-400" /> AI diagnosis
+                <span className="text-xs uppercase tracking-wider text-labels-tertiary flex items-center gap-1">
+                  <Sparkles size={11} className="text-status-ai" /> AI diagnosis
                 </span>
                 {aiFindings.length > 0 && (
                   <button
                     onClick={() => setShowAiBoxes((v) => !v)}
-                    className="text-[9px] text-gray-500 hover:text-gray-300"
+                    className="text-xs text-labels-tertiary hover:text-labels-primary"
                     title="Toggle boxes"
                   >
                     {showAiBoxes ? 'Hide boxes' : 'Show boxes'}
@@ -934,7 +896,7 @@ export default function DicomViewerPage() {
               <button
                 onClick={runAiDiagnosis}
                 disabled={aiStage === 'running'}
-                className="w-full text-[11px] py-1.5 rounded bg-purple-700 hover:bg-purple-600 disabled:opacity-60 text-white flex items-center justify-center gap-1.5"
+                className="w-full text-xs py-1.5 rounded bg-status-ai hover:bg-status-ai-hover disabled:opacity-60 text-white flex items-center justify-center gap-1.5"
               >
                 {aiStage === 'running'
                   ? <><Loader2 size={11} className="animate-spin" /> Analyzing…</>
@@ -942,11 +904,11 @@ export default function DicomViewerPage() {
               </button>
 
               {aiStage === 'error' && (
-                <p className="text-[10px] text-red-300 mt-2 leading-snug">{aiError}</p>
+                <p className="text-xs text-status-danger mt-2 leading-snug">{aiError}</p>
               )}
 
               {aiStage === 'done' && aiFindings.length === 0 && (
-                <p className="text-[10px] text-gray-400 mt-2 leading-snug">
+                <p className="text-xs text-labels-secondary mt-2 leading-snug">
                   No clearly abnormal findings flagged.{aiSummary ? ` ${aiSummary}` : ''}
                 </p>
               )}
@@ -954,7 +916,7 @@ export default function DicomViewerPage() {
               {aiFindings.length > 0 && (
                 <>
                   {aiSummary && (
-                    <p className="text-[10px] text-gray-400 mt-2 leading-snug">{aiSummary}</p>
+                    <p className="text-xs text-labels-secondary mt-2 leading-snug">{aiSummary}</p>
                   )}
                   <div className="mt-2 space-y-1 max-h-56 overflow-y-auto">
                     {aiFindings.map((f, i) => {
@@ -965,25 +927,25 @@ export default function DicomViewerPage() {
                           onMouseEnter={() => setActiveFinding(i)}
                           onMouseLeave={() => setActiveFinding((v) => (v === i ? null : v))}
                           className={`w-full text-left rounded px-1.5 py-1 flex items-start gap-1.5 ${
-                            activeFinding === i ? 'bg-gray-800' : 'bg-gray-900 hover:bg-gray-800'
+                            activeFinding === i ? 'bg-fills-f1' : 'bg-background-tertiary hover:bg-fills-f1'
                           }`}
                         >
                           <span
-                            className="mt-0.5 text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center shrink-0"
-                            style={{ backgroundColor: color, color: '#0b0d10' }}
+                            className="mt-0.5 text-xs font-bold w-4 h-4 rounded-full flex items-center justify-center shrink-0"
+                            style={{ backgroundColor: color, color: VIEWER_TOKENS.bgPrimary }}
                           >
                             {i + 1}
                           </span>
                           <span className="flex-1 min-w-0">
                             <span className="flex items-center justify-between gap-1">
-                              <span className="text-[10.5px] text-gray-200 font-medium truncate">
+                              <span className="text-xs text-labels-primary font-medium truncate">
                                 {typeLabel(f.type)}{f.tooth ? ` · ${f.tooth}` : ''}
                               </span>
-                              <span className="text-[9px] font-mono tabular-nums" style={{ color }}>
+                              <span className="text-xs font-mono tabular-nums" style={{ color }}>
                                 {Math.round(f.confidence * 100)}%
                               </span>
                             </span>
-                            <span className="block text-[9.5px] text-gray-500 leading-snug">{f.description}</span>
+                            <span className="block text-xs text-labels-tertiary leading-snug">{f.description}</span>
                           </span>
                         </button>
                       );
@@ -991,11 +953,11 @@ export default function DicomViewerPage() {
                   </div>
                   <button
                     onClick={clearAiFindings}
-                    className="w-full mt-1.5 text-[9.5px] text-gray-500 hover:text-red-300 flex items-center justify-center gap-1"
+                    className="w-full mt-1.5 text-xs text-labels-tertiary hover:text-status-danger flex items-center justify-center gap-1"
                   >
                     <XIcon size={9} /> Clear findings
                   </button>
-                  <p className="text-[8.5px] text-gray-600 mt-1.5 leading-tight">
+                  <p className="text-xs text-labels-tertiary mt-1.5 leading-tight">
                     AI-assisted · verify before use. Not a diagnosis.{aiModel ? ` (${aiModel})` : ''}
                   </p>
                 </>

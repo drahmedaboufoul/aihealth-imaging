@@ -65,29 +65,24 @@ export default function LoginPage() {
     <div className="h-screen w-screen flex items-center justify-center bg-bg p-6">
       <form
         onSubmit={submit}
-        className="w-full max-w-sm rounded-xl p-6 space-y-4"
-        style={{
-          backgroundColor: 'var(--surface, #fff)',
-          border: '1px solid var(--border, #e5dccb)',
-          boxShadow: '0 4px 24px rgba(0,0,0,0.06)',
-        }}
+        className="w-full max-w-sm rounded-xl p-6 space-y-4 bg-background-secondary border border-separator-s1 shadow-2xl"
       >
         <div className="text-center mb-2">
           <img src="/aihealth-mark.png" alt="aiHealth" width="48" height="48" className="mx-auto mb-2 h-12 w-12 object-contain" />
-          <div className="text-[11px] font-bold uppercase tracking-widest text-accent">aiHealth</div>
-          <h1 className="text-lg font-semibold text-text mt-1">Imaging — Sign in</h1>
-          <p className="text-[11px] text-muted mt-1">Use your aiHealth EMR credentials.</p>
+          <div className="text-xs font-bold uppercase tracking-widest text-accent">aiHealth</div>
+          <h1 className="text-lg font-semibold text-labels-primary mt-1">Imaging — Sign in</h1>
+          <p className="text-xs text-labels-secondary mt-1">Use your aiHealth EMR credentials.</p>
         </div>
 
         {error && (
-          <div className="flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-red-900 text-[12px]">
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-status-danger-soft border border-status-danger/40 text-status-danger text-xs">
             <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
             <span>{error}</span>
           </div>
         )}
 
         <div>
-          <label className="text-[11px] font-medium text-muted uppercase tracking-wide" htmlFor="email">Email</label>
+          <label className="text-xs font-medium text-labels-tertiary uppercase tracking-wide" htmlFor="email">Email</label>
           <input
             id="email"
             type="email"
@@ -95,13 +90,12 @@ export default function LoginPage() {
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full h-10 px-3 mt-1 rounded-md border text-sm text-text"
-            style={{ borderColor: 'var(--border, #e5dccb)' }}
+            className="w-full h-10 px-3 mt-1 rounded-md border border-separator-s1 bg-background-tertiary text-sm text-labels-primary focus:border-accent"
           />
         </div>
 
         <div>
-          <label className="text-[11px] font-medium text-muted uppercase tracking-wide" htmlFor="password">Password</label>
+          <label className="text-xs font-medium text-labels-tertiary uppercase tracking-wide" htmlFor="password">Password</label>
           <div className="relative mt-1">
             <input
               id="password"
@@ -110,13 +104,12 @@ export default function LoginPage() {
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full h-10 px-3 pr-9 rounded-md border text-sm text-text"
-              style={{ borderColor: 'var(--border, #e5dccb)' }}
+              className="w-full h-10 px-3 pr-9 rounded-md border border-separator-s1 bg-background-tertiary text-sm text-labels-primary focus:border-accent"
             />
             <button
               type="button"
               onClick={() => setShowPwd((s) => !s)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-labels-tertiary hover:text-labels-primary"
               tabIndex={-1}
               aria-label={showPwd ? 'Hide password' : 'Show password'}
             >
@@ -128,18 +121,17 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={busy || !email || !password}
-          className="w-full h-10 rounded-md font-semibold text-[13px] flex items-center justify-center gap-2 disabled:opacity-50"
-          style={{ backgroundColor: 'var(--accent, #c8a951)', color: 'var(--bg, #fff)' }}
+          className="w-full h-10 rounded-md font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-50 bg-accent text-white hover:bg-accent-hover"
         >
           {busy ? (<><Loader2 size={14} className="animate-spin" /> Signing in…</>) : 'Sign in'}
         </button>
 
         <div className="text-center pt-2">
-          <Link to="/" className="text-[11px] text-muted hover:text-text">Back to home</Link>
+          <Link to="/" className="text-xs text-labels-tertiary hover:text-labels-primary">Back to home</Link>
         </div>
 
         {next !== '/' && (
-          <p className="text-[10px] text-muted text-center pt-1">
+          <p className="text-xs text-labels-tertiary text-center pt-1">
             You'll be returned to <code className="font-mono">{next}</code> after signing in.
           </p>
         )}

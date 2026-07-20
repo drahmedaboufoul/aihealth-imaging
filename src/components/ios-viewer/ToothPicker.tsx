@@ -27,6 +27,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { Html } from '@react-three/drei';
+import { toast } from 'sonner';
 import { useIOSViewerStore } from './store/iosViewerStore';
 
 interface Props {
@@ -134,7 +135,7 @@ export default function ToothPicker({ active }: Props) {
   const handleConfirm = (fdi: string) => {
     if (!pending) return;
     if (!/^[1-8][1-8]$/.test(fdi)) {
-      alert(`"${fdi}" isn't a valid FDI tooth number. Use 2 digits, e.g. 11, 36, 48.`);
+      toast.warning(`"${fdi}" isn't a valid FDI tooth number. Use 2 digits, e.g. 11, 36, 48.`);
       return;
     }
     addAnnotation({

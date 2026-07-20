@@ -50,7 +50,7 @@ export default function SharedViewerPage() {
       <div className="h-screen w-screen bg-bg flex items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-muted">
           <Loader2 size={28} className="animate-spin" />
-          <p className="text-[12px]">Verifying share link…</p>
+          <p className="text-xs">Verifying share link…</p>
         </div>
       </div>
     );
@@ -62,10 +62,10 @@ export default function SharedViewerPage() {
         <div className="max-w-md w-full text-center flex flex-col items-center gap-4">
           <Lock size={32} className="text-destructive" />
           <div>
-            <p className="text-[14px] font-medium text-text">Link can't be opened</p>
-            <p className="text-[11px] text-muted mt-1">{state.error || 'The link may be expired, revoked, or used too many times.'}</p>
+            <p className="text-sm font-medium text-text">Link can't be opened</p>
+            <p className="text-xs text-muted mt-1">{state.error || 'The link may be expired, revoked, or used too many times.'}</p>
           </div>
-          <p className="text-[10.5px] text-muted">
+          <p className="text-xs text-muted">
             If you believe this is in error, contact the clinic that sent you the link.
           </p>
         </div>
@@ -96,25 +96,24 @@ export default function SharedViewerPage() {
   return (
     <div className="h-screen w-screen flex flex-col bg-bg">
       <div
-        className="flex items-center justify-between px-3 py-1.5 border-b text-[11px]"
-        style={{ borderColor: '#1d2128', backgroundColor: '#15181c', color: '#cdd2d8' }}
+        className="flex items-center justify-between px-3 py-1.5 border-b border-separator-s1 bg-background-secondary text-labels-primary text-xs"
       >
         <div className="flex items-center gap-3">
-          <span className="font-bold text-amber-400 uppercase tracking-wider text-[10px]">Shared session</span>
-          <span className="text-gray-400">
+          <span className="font-bold text-accent uppercase tracking-wider text-xs">Shared session</span>
+          <span className="text-labels-secondary">
             {study?.patient_name && <span>{study.patient_name} · </span>}
             {studyType?.replace(/_/g, ' ')} · {study?.study_date && new Date(study.study_date).toLocaleDateString('en-GB')}
           </span>
         </div>
         <div className="flex items-center gap-3">
           {expiresIn != null && (
-            <span className="text-gray-500">Expires in {expiresIn} day{expiresIn === 1 ? '' : 's'}</span>
+            <span className="text-labels-tertiary">Expires in {expiresIn} day{expiresIn === 1 ? '' : 's'}</span>
           )}
           {permission === 'export' && studyType === 'cbct' && niftiUrl && (
             <a
               href={niftiUrl}
               download={`${study.id}.nii.gz`}
-              className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-amber-600 text-white text-[10px] font-semibold hover:bg-amber-500"
+              className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-accent text-white text-xs font-semibold hover:bg-accent-hover"
             >
               <Download size={10} /> Export NIfTI
             </a>

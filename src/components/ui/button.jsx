@@ -4,22 +4,27 @@ import { cva } from "class-variance-authority";
 
 import { cn } from "@/lib/utils"
 
+/**
+ * Button — token-styled variants (audit #23/W6): gradient variants and
+ * colored shadows stripped; transitions specify exact properties
+ * (animation.md — no `transition-all`).
+ */
 const buttonVariants = cva(
-  "inline-flex items-center justify-center whitespace-nowrap rounded-lg text-sm font-semibold ring-offset-background transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98]",
+  "inline-flex items-center justify-center whitespace-nowrap rounded-lg text-sm font-semibold transition-[color,background-color,border-color,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98]",
   {
     variants: {
       variant: {
-        default: "bg-gradient-to-r from-primary to-primary/90 text-primary-foreground shadow-md shadow-primary/25 hover:shadow-lg hover:shadow-primary/30 hover:from-primary/95 hover:to-primary/85",
+        default: "bg-primary text-primary-foreground hover:bg-accent-hover",
         destructive:
-          "bg-gradient-to-r from-destructive to-destructive/90 text-destructive-foreground shadow-md shadow-destructive/25 hover:shadow-lg hover:shadow-destructive/30 hover:from-destructive/95 hover:to-destructive/85",
+          "bg-destructive text-destructive-foreground hover:bg-status-danger-hover",
         outline:
-          "border-2 border-input bg-background/50 backdrop-blur-sm hover:bg-accent hover:text-accent-foreground hover:border-primary/50 hover:shadow-md",
+          "border border-input bg-transparent text-labels-primary hover:bg-fills-f1",
         secondary:
-          "bg-gradient-to-r from-secondary to-secondary/90 text-secondary-foreground shadow-sm hover:shadow-md hover:from-secondary/95 hover:to-secondary/85",
-        ghost: "hover:bg-accent/80 hover:text-accent-foreground hover:shadow-sm",
-        link: "text-primary underline-offset-4 hover:underline hover:text-primary/80",
-        success: "bg-gradient-to-r from-success to-success/90 text-success-foreground shadow-md shadow-success/25 hover:shadow-lg hover:shadow-success/30 hover:from-success/95 hover:to-success/85",
-        warning: "bg-gradient-to-r from-warning to-warning/90 text-warning-foreground shadow-md shadow-warning/25 hover:shadow-lg hover:shadow-warning/30 hover:from-warning/95 hover:to-warning/85",
+          "bg-fills-f1 text-labels-primary hover:bg-fills-f2",
+        ghost: "text-labels-primary hover:bg-fills-f1",
+        link: "text-accent underline-offset-4 hover:underline",
+        success: "bg-success text-success-foreground hover:bg-status-success-hover",
+        warning: "bg-warning text-warning-foreground hover:opacity-90",
       },
       size: {
         default: "h-11 px-5 py-2.5",

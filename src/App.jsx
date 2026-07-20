@@ -4,7 +4,6 @@ import HomePage from './pages/HomePage';
 import HealthPage from './pages/HealthPage';
 import NotFoundPage from './pages/NotFoundPage';
 import LoginPage from './pages/LoginPage';
-import ViewerStub from './components/ViewerStub';
 
 // IOS viewer is heavy (Three.js + react-three-fiber) — lazy-load it
 const IOSViewerPage = lazy(() => import('./pages/IOSViewerPage'));
@@ -49,7 +48,7 @@ export default function App() {
           </Suspense>
         }
       />
-      {/* CBCT volume — still stub, needs Cornerstone3D + volume rendering */}
+      {/* CBCT volume viewer — Cornerstone3D MPR + volume rendering (heaviest, lazy) */}
       <Route
         path="/viewer/cbct"
         element={

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid, PerspectiveCamera, Line, Environment } from '@react-three/drei';
 import * as THREE from 'three';
+import { toast } from 'sonner';
 import type { Patient, Scan, ViewerSettings, ToolType, MouseSettings } from './types';
 import { MultiMeshModel, type MeshFile } from './MultiMeshModel';
 import MeasureTool from './MeasureTool';
@@ -613,7 +614,7 @@ export function ModelViewer({
   const handleScreenshot = () => {
     const canvas = document.querySelector('canvas') as HTMLCanvasElement | null;
     if (!canvas) {
-      alert('No canvas found.');
+      toast.error('No canvas found.');
       return;
     }
     // Force a render so the framebuffer has fresh contents
@@ -633,7 +634,7 @@ export function ModelViewer({
           a.click();
           document.body.removeChild(a);
         } catch (e) {
-          alert('Screenshot failed: ' + (e as Error).message);
+          toast.error('Screenshot failed: ' + (e as Error).message);
         }
       });
     });

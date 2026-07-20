@@ -3,9 +3,18 @@
  * inside a viewer (the DentalX "Invite" flow, built on imaging_share_invites).
  *
  * Two states: the form, then the generated-link view with copy buttons.
+ * Rebuilt on the repo's Radix ui/dialog (audit W8): focus trap, Escape
+ * handling, aria wiring; styled on the shared semantic token set.
  */
 import { useState } from 'react';
-import { Loader2, X, Copy, Check, Share2, Link as LinkIcon } from 'lucide-react';
+import { Loader2, Copy, Check, Share2, Link as LinkIcon } from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import {
   createShareInvite, PERMISSIONS, VALIDITY_UNITS, computeExpiry, isValidEmail,
 } from '../lib/shareInvite';
@@ -52,103 +61,102 @@ export default function ShareInviteDialog({ studyId, patientName, onClose }) {
     } catch { /* clipboard blocked — user can select manually */ }
   };
 
+  const inputCls =
+    'w-full mt-1 px-2 py-1.5 rounded text-sm bg-background-tertiary text-labels-primary border border-separator-s1 focus:border-accent';
+  const labelCls = 'text-xs uppercase tracking-wider text-labels-tertiary';
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={onClose}>
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md mx-4 rounded-lg shadow-2xl text-sm"
-        style={{ backgroundColor: '#15181c', border: '1px solid #1d2128', color: '#cdd2d8' }}
+    <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent
+        aria-describedby={undefined}
+        className="max-w-md gap-0 rounded-lg border-separator-s1 bg-background-secondary p-0 text-sm text-labels-primary"
       >
-        <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: '#1d2128' }}>
-          <h2 className="font-semibold flex items-center gap-2">
-            <Share2 size={15} className="text-amber-400" /> Share this study
-          </h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-200"><X size={16} /></button>
-        </div>
+        <DialogHeader className="px-4 py-3 border-b border-separator-s1 flex-row items-center space-y-0 text-left">
+          <DialogTitle className="text-sm font-semibold flex items-center gap-2">
+            <Share2 size={15} className="text-accent" /> Share this study
+          </DialogTitle>
+        </DialogHeader>
 
         {stage === 'done' && result ? (
           <div className="p-4 space-y-3">
-            <div className="flex items-center gap-2 text-green-400 text-[12px]">
+            <DialogDescription className="flex items-center gap-2 text-status-success text-xs">
               <Check size={14} /> Link created — expires {new Date(result.expiresAt).toLocaleString('en-GB')}
-            </div>
-            <div
-              className="flex items-center gap-2 rounded px-2 py-2 text-[11px] font-mono break-all"
-              style={{ backgroundColor: '#0b0d10', border: '1px solid #1d2128' }}
-            >
-              <LinkIcon size={12} className="text-gray-500 shrink-0" />
+            </DialogDescription>
+            <div className="flex items-center gap-2 rounded px-2 py-2 text-xs font-mono break-all bg-background-tertiary border border-separator-s1">
+              <LinkIcon size={12} className="text-labels-tertiary shrink-0" />
               <span className="flex-1 min-w-0">{result.url}</span>
             </div>
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => copy('link')}
-                className="text-[11px] py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white flex items-center justify-center gap-1.5"
+                className="text-xs py-1.5 rounded bg-accent hover:bg-accent-hover text-white flex items-center justify-center gap-1.5"
               >
                 {copied === 'link' ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy link</>}
               </button>
               <button
                 onClick={() => copy('all')}
-                className="text-[11px] py-1.5 rounded bg-gray-800 hover:bg-gray-700 flex items-center justify-center gap-1.5"
+                className="text-xs py-1.5 rounded bg-fills-f1 hover:bg-fills-f2 text-labels-primary flex items-center justify-center gap-1.5"
               >
                 {copied === 'all' ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy with details</>}
               </button>
             </div>
-            <p className="text-[10px] text-gray-500 leading-snug">
+            <p className="text-xs text-labels-tertiary leading-snug">
               Anyone with this link can open the study read-only until it expires or the view limit is reached.
               You can revoke it from the study record.
             </p>
-            <button onClick={onClose} className="w-full text-[11px] py-1.5 rounded bg-gray-800 hover:bg-gray-700">Done</button>
+            <button onClick={onClose} className="w-full text-xs py-1.5 rounded bg-fills-f1 hover:bg-fills-f2 text-labels-primary">Done</button>
           </div>
         ) : (
           <div className="p-4 space-y-3">
             <label className="block">
-              <span className="text-[10px] uppercase tracking-wider text-gray-400">Recipient email</span>
+              <span className={labelCls}>Recipient email</span>
               <input
                 type="email" value={email} onChange={(e) => setEmail(e.target.value)}
                 placeholder="colleague@clinic.com" autoFocus
-                className="w-full mt-1 px-2 py-1.5 rounded text-[12px] bg-gray-900 border border-gray-800 focus:border-amber-600 outline-none"
+                className={inputCls}
               />
             </label>
             <label className="block">
-              <span className="text-[10px] uppercase tracking-wider text-gray-400">Recipient name (optional)</span>
+              <span className={labelCls}>Recipient name (optional)</span>
               <input
                 type="text" value={name} onChange={(e) => setName(e.target.value)}
                 placeholder="Dr Jane Smith"
-                className="w-full mt-1 px-2 py-1.5 rounded text-[12px] bg-gray-900 border border-gray-800 focus:border-amber-600 outline-none"
+                className={inputCls}
               />
             </label>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <span className="text-[10px] uppercase tracking-wider text-gray-400">Valid for</span>
+                <span className={labelCls}>Valid for</span>
                 <div className="flex gap-1 mt-1">
                   <input
                     type="number" min={1} value={amount}
                     onChange={(e) => setAmount(e.target.value)}
-                    className="w-16 px-2 py-1.5 rounded text-[12px] bg-gray-900 border border-gray-800 focus:border-amber-600 outline-none"
+                    className={`w-16 !mt-0 ${inputCls}`}
                   />
                   <select
                     value={unit} onChange={(e) => setUnit(e.target.value)}
-                    className="flex-1 px-1 py-1.5 rounded text-[12px] bg-gray-900 border border-gray-800 focus:border-amber-600 outline-none"
+                    className={`flex-1 !mt-0 ${inputCls}`}
                   >
                     {VALIDITY_UNITS.map((u) => <option key={u.value} value={u.value}>{u.label}</option>)}
                   </select>
                 </div>
               </div>
               <label className="block">
-                <span className="text-[10px] uppercase tracking-wider text-gray-400">Max views</span>
+                <span className={labelCls}>Max views</span>
                 <input
                   type="number" min={1} value={maxViews}
                   onChange={(e) => setMaxViews(e.target.value)}
-                  className="w-full mt-1 px-2 py-1.5 rounded text-[12px] bg-gray-900 border border-gray-800 focus:border-amber-600 outline-none"
+                  className={inputCls}
                 />
               </label>
             </div>
             <div>
-              <span className="text-[10px] uppercase tracking-wider text-gray-400">Permission</span>
+              <span className={labelCls}>Permission</span>
               <div className="flex gap-1 mt-1">
                 {PERMISSIONS.map((p) => (
                   <button
                     key={p.value} onClick={() => setPermission(p.value)}
-                    className={`flex-1 text-[11px] py-1.5 rounded ${permission === p.value ? 'bg-amber-600 text-white' : 'bg-gray-800 hover:bg-gray-700'}`}
+                    className={`flex-1 text-xs py-1.5 rounded ${permission === p.value ? 'bg-accent text-white' : 'bg-fills-f1 hover:bg-fills-f2 text-labels-primary'}`}
                   >
                     {p.label}
                   </button>
@@ -156,27 +164,27 @@ export default function ShareInviteDialog({ studyId, patientName, onClose }) {
               </div>
             </div>
             <label className="block">
-              <span className="text-[10px] uppercase tracking-wider text-gray-400">Note (optional)</span>
+              <span className={labelCls}>Note (optional)</span>
               <input
                 type="text" value={note} onChange={(e) => setNote(e.target.value)}
                 placeholder="Second opinion on 46"
-                className="w-full mt-1 px-2 py-1.5 rounded text-[12px] bg-gray-900 border border-gray-800 focus:border-amber-600 outline-none"
+                className={inputCls}
               />
             </label>
 
-            <p className="text-[10px] text-gray-500">Link will expire {new Date(expiryPreview).toLocaleString('en-GB')}.</p>
-            {stage === 'error' && <p className="text-[11px] text-red-300">{error}</p>}
+            <p className="text-xs text-labels-tertiary">Link will expire {new Date(expiryPreview).toLocaleString('en-GB')}.</p>
+            {stage === 'error' && <p role="alert" className="text-xs text-status-danger">{error}</p>}
 
             <button
               onClick={submit}
               disabled={stage === 'creating' || !isValidEmail(email)}
-              className="w-full text-[12px] py-2 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white flex items-center justify-center gap-2 font-medium"
+              className="w-full text-sm py-2 rounded bg-accent hover:bg-accent-hover disabled:opacity-50 text-white flex items-center justify-center gap-2 font-medium"
             >
               {stage === 'creating' ? <><Loader2 size={13} className="animate-spin" /> Creating…</> : <><Share2 size={13} /> Create share link</>}
             </button>
           </div>
         )}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

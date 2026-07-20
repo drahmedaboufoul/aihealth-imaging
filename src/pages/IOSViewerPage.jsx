@@ -25,6 +25,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, Link, useNavigate, useLocation } from 'react-router-dom';
 import { Loader2, AlertCircle, ArrowLeft, ExternalLink, GitCompare, X, Share2 } from 'lucide-react';
+import { toast } from 'sonner';
 import ShareInviteDialog from '../components/ShareInviteDialog';
 import { resolveSignedUrl, resolveStudyFiles } from '../lib/signedUrl';
 import { readSharePayload, shareMeshFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
@@ -294,7 +295,7 @@ export default function IOSViewerPage() {
       setComparisonStudyInfo({ id: chosenStudyId, label });
       setShowCompareDialog(false);
     } catch (e) {
-      alert('Could not load study: ' + (e?.message || e));
+      toast.error('Could not load study: ' + (e?.message || e));
     }
   };
 

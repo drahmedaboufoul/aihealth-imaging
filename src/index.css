@@ -3,10 +3,57 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    /* ── Semantic dark token set (Kimi tokens.json · dark) ─────────────
+       Single source of truth for the whole app. tailwind.config.js maps
+       utility classes onto these vars; components/viewer/viewerTokens.js
+       mirrors the same values for JS / SVG / canvas consumers. */
+    --bg-primary: #121212;          /* background.primary  */
+    --bg-secondary: #1F1F1F;        /* background.secondary */
+    --bg-tertiary: #292929;         /* background.tertiary  */
+    --label-primary: rgba(255, 255, 255, 0.84);
+    --label-secondary: rgba(255, 255, 255, 0.56);
+    --label-tertiary: rgba(255, 255, 255, 0.42);
+    --label-quaternary: rgba(255, 255, 255, 0.26);
+    --separator-s1: rgba(255, 255, 255, 0.12);
+    --fill-f1: rgba(255, 255, 255, 0.05);
+    --fill-f2: rgba(255, 255, 255, 0.1);
+    --fill-f3: rgba(255, 255, 255, 0.18);
+
+    /* ONE accent (color.status.kimiBlue) — replaces amber/#5DA9E9 */
+    --accent: #1A88FF;
+    --accent-hover: #258EFF;
+    --accent-active: #3194FF;
+    --accent-soft: rgba(26, 136, 255, 0.14);
+
+    /* Status: nerve/success = positiveGreen, too-close/destructive =
+       danger, AI = purple (audit #18) */
+    --danger: #FF4756;
+    --danger-hover: #FF505E;
+    --danger-soft: rgba(255, 71, 86, 0.25);
+    --positive: #16C456;
+    --positive-hover: #22C75E;
+    --positive-soft: rgba(22, 196, 86, 0.25);
+    --warning: #FF9F0A;
+    --warning-soft: rgba(255, 159, 10, 0.16);
+    --ai: #A16BFF;
+    --ai-hover: #A672FF;
+    --ai-soft: rgba(161, 107, 255, 0.16);
+
+    /* Layering tokens (web-best-practices §14) */
+    --z-header: 500;
+    --z-modal-backdrop: 800;
+    --z-modal: 810;
+    --z-dialog-backdrop: 850;
+    --z-dialog: 860;
+    --z-tooltip: 900;
+    --z-toast: 1000;
+  }
+
   html, body, #root {
     height: 100%;
-    background: #0A0A0B;
-    color: #E8E9EC;
+    background: var(--bg-primary);
+    color: var(--label-primary);
     font-family: 'Inter', system-ui, sans-serif;
     font-feature-settings: 'cv11', 'ss01';
     -webkit-font-smoothing: antialiased;
@@ -18,5 +65,31 @@
 
   button {
     cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+
+  /* Global keyboard focus ring (audit #15): 2px kimiBlue + 2px offset on
+     anything that doesn't already draw its own focus ring. Components with
+     a tokenized ring (ui/button, ui/slider thumb) keep outline-none. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* Medical canvases render with smooth resampling — never blocky
+     `pixelated` upscaling on diagnostic imagery (audit #26). */
+  canvas {
+    image-rendering: auto;
+  }
+
+  /* Reduced motion (animation.md §9.1): fewer + gentler, not zero. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }

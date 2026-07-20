@@ -161,7 +161,7 @@ Don't make inference synchronous. It's slow, it fails, and you don't want the vi
 
 ### Cross-cutting — metadata + auth
 
-**Phase 1-2:** shared Supabase project with the EMR (`bxtqnfylaiimbgjweywi`). Same auth, same RLS.
+**Phase 1-2:** shared Supabase project with the EMR (`<your-supabase-project>`). Same auth, same RLS.
 **Phase 3:** dedicated `aih-imaging` Supabase project. Reasons to split:
 - Imaging metadata grows fast (every study = 1 row in `imaging_studies` + N in `imaging_instances`); you don't want to slow down EMR queries
 - Different RLS shape (third-party EMR integrations need to write studies without EMR auth context)

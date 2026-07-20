@@ -1,6 +1,6 @@
 /*
  * Supabase client.
- * Phase 1: shares the EMR's Supabase project (bxtqnfylaiimbgjweywi).
+ * Phase 1: shares the EMR's Supabase project.
  * This means a user authenticated to the EMR is already authenticated here
  * once cookies are scoped to a shared parent domain (e.g. *.aihealth.app).
  *
@@ -9,11 +9,15 @@
 
 import { createClient } from '@supabase/supabase-js';
 
-export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://bxtqnfylaiimbgjweywi.supabase.co';
-export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+if (!SUPABASE_URL) {
+  throw new Error('Missing VITE_SUPABASE_URL — set it in .env.local');
+}
 
 if (!SUPABASE_ANON_KEY) {
-  console.warn('[imaging] VITE_SUPABASE_ANON_KEY missing — auth + signed URLs will not work until Vercel env is configured.');
+  throw new Error('Missing VITE_SUPABASE_ANON_KEY — set it in .env.local');
 }
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {

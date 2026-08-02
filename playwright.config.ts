@@ -14,6 +14,9 @@ const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?.trim();
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  // *.e2e.ts, not *.spec.ts: unit runners (vitest, jest) glob **/*.spec.ts by
+  // default and choke on Playwright's test() when they pick these up.
+  testMatch: "**/*.e2e.ts",
   outputDir: path.join(os.tmpdir(), "aihealth-imaging-playwright"),
   fullyParallel: false,
   workers: 1,

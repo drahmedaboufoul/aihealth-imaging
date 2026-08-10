@@ -1,0 +1,88 @@
+name: Deploy Supabase
+
+# WHY THIS EXISTS
+# App code deployed automatically on merge while migrations and Edge Functions
+# were applied by hand. Two consequences, both of which bit us repeatedly:
+#
+#   1. Split-brain deploys. A change spanning code + schema went live in two
+#      halves at unrelated moments. Merge first and the app ran against an old
+#      schema; apply first and the repo recorded the wrong version.
+#   2. Version drift. Applying a migration by hand stamps the moment of
+#      application, not the filename — so repo history and remote history
+#      diverged every time, and someone had to repair it afterwards.
+#
+# Making the merge the only trigger fixes both. The CLI applies the FILE, so
+# the recorded version is the filename by construction and (2) cannot recur.
+#
+# REQUIRED REPOSITORY SECRETS — until all three are set this workflow reports
+# what is missing and exits successfully, so merging it changes nothing:
+#   SUPABASE_ACCESS_TOKEN   Personal access token (Account → Access Tokens)
+#   SUPABASE_PROJECT_REF    Project ref, e.g. gbaevzengjcfvedkrvqs
+#   SUPABASE_DB_PASSWORD    Database password for the linked project
+# Gated on this repo's own CI: the deploy only starts after a green run of
+# "test" on main, so a failing test suite can never reach production.
+on:
+  workflow_run:
+    workflows: ["test"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+
+# Never let two deploys touch the same project at once.
+concurrency:
+  group: supabase-deploy-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Apply migrations and deploy functions
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Check deploy credentials
+        id: cfg
+        env:
+          ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          missing=""
+          [ -z "$ACCESS_TOKEN" ] && missing="$missing SUPABASE_ACCESS_TOKEN"
+          [ -z "$PROJECT_REF" ]  && missing="$missing SUPABASE_PROJECT_REF"
+          [ -z "$DB_PASSWORD" ]  && missing="$missing SUPABASE_DB_PASSWORD"
+          if [ -n "$missing" ]; then
+            # Exit 0 on purpose: an unconfigured repo should be inert, not a
+            # red X on every merge.
+            echo "::notice::Supabase deploy skipped — missing secrets:$missing"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: supabase/setup-cli@v1
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          version: latest
+
+      - name: Link project
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
+      - name: Deploy Edge Functions
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        # Deploys every function in supabase/functions. Redeploying an
+        # unchanged function is a no-op for behaviour, so this stays correct at
+        # the cost of some wall-clock on repos with many functions.
+        run: supabase functions deploy

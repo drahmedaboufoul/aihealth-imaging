@@ -13,5 +13,12 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/**/*.test.{js,jsx,ts,tsx}'],
+    // The share-invite unit tests import the browser Supabase module even
+    // though they exercise only pure helpers. Keep production startup
+    // fail-closed while supplying inert values in the isolated test process.
+    env: {
+      VITE_SUPABASE_URL: 'http://127.0.0.1:54321',
+      VITE_SUPABASE_ANON_KEY: 'test-anon-key',
+    },
   },
 });

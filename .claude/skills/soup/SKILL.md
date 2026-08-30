@@ -29,8 +29,8 @@ training run**:
 soup advise    # -> PROMPT_ENG / RAG / SFT / DPO / GRPO
 ```
 
-Fine-tuning teaches *form, format and behaviour*. It is a poor and expensive way to
-teach *facts* — facts belong in RAG, or in `soup edit` (ROME/MEMIT knowledge editing)
+Fine-tuning teaches _form, format and behaviour_. It is a poor and expensive way to
+teach _facts_ — facts belong in RAG, or in `soup edit` (ROME/MEMIT knowledge editing)
 which patches a fact without retraining. Say so plainly rather than starting a GPU run.
 
 ## Install
@@ -75,7 +75,7 @@ soup apply    # executes, refusing on drift
 
 ```yaml
 base: meta-llama/Llama-3.1-8B-Instruct
-task: sft                     # sft | dpo | orpo | simpo | kto
+task: sft # sft | dpo | orpo | simpo | kto
 data:
   train: ./data/train.jsonl
   format: alpaca
@@ -84,9 +84,9 @@ data:
 training:
   epochs: 3
   lr: 2e-5
-  batch_size: auto            # auto-detected from VRAM
+  batch_size: auto # auto-detected from VRAM
   lora: { r: 64, alpha: 16, target_modules: auto }
-  quantization: 4bit          # QLoRA
+  quantization: 4bit # QLoRA
 output: ./output
 ```
 

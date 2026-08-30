@@ -3,9 +3,9 @@
 Installed 2026-08-30 on owner direction ("install this in xaen core and all repos and
 for your logic also", linking https://github.com/MakazhanAlpamys/Soup).
 
-| Vendored dir | Skill name | Upstream | Pinned at |
-|---|---|---|---|
-| `soup/` | soup | https://github.com/MakazhanAlpamys/Soup | `6236763` (2026-08-30), PyPI `soup-cli` 0.73.3 |
+| Vendored dir | Skill name | Upstream                                | Pinned at                                      |
+| ------------ | ---------- | --------------------------------------- | ---------------------------------------------- |
+| `soup/`      | soup       | https://github.com/MakazhanAlpamys/Soup | `6236763` (2026-08-30), PyPI `soup-cli` 0.73.3 |
 
 ## What Soup is
 

@@ -63,6 +63,7 @@ export default function IOSViewerPage() {
   // meshLayers is populated by MultiMeshModel after files load and supersedes
   // the per-role flags for the right panel.
   const [viewerSettings, setViewerSettings] = useState({
+    appearance: 'original',
     maxillaVisible: true,
     maxillaOpacity: 100,
     mandibleVisible: true,

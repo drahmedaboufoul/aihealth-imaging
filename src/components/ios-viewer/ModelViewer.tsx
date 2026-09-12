@@ -963,15 +963,15 @@ export function ModelViewer({
 
               {isMultiFile && <div className="mb-4">
                 <label htmlFor="scan-appearance" className="block text-xs font-medium text-gray-600 mb-1.5">Appearance</label>
-                <select id="scan-appearance" value={viewerSettings.appearance || 'natural'}
+                <select id="scan-appearance" value={viewerSettings.appearance || 'original'}
                   onChange={(event) => onUpdateSettings({ appearance: event.target.value as ViewerSettings['appearance'] })}
                   className="w-full rounded border border-gray-200 bg-white p-2 text-sm text-gray-800">
                   <option value="natural">Natural light</option>
-                  <option value="original">Original scan colour</option>
+                  <option value="original">Scan meshes</option>
                   <option value="surface">Surface detail</option>
                 </select>
                 <p className="mt-1.5 text-xs text-gray-500">
-                  {viewerSettings.appearance === 'original' ? 'Captured colour without added shading. Uncoloured scans use a neutral surface.'
+                  {(viewerSettings.appearance || 'original') === 'original' ? 'Captured scan colour. Uncoloured meshes use a neutral surface.'
                     : viewerSettings.appearance === 'surface' ? 'Matte shading reveals the scanned surface.'
                     : 'Soft lighting with the scanner’s captured colour.'}
                 </p>

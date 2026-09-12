@@ -328,7 +328,7 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
           <ScanMesh key={meshKey} mesh={m} meshKey={meshKey}
             label={layer?.label || m.fileName} visible={visible}
             opacity={Math.max(0, Math.min(1, opacityPct / 100))}
-            appearance={viewerSettings.appearance || 'natural'} />
+            appearance={viewerSettings.appearance || 'original'} />
         );
       })}
     </group>

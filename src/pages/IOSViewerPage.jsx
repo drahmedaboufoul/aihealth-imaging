@@ -131,6 +131,8 @@ export default function IOSViewerPage() {
             url: f.url,
             fileName: f.fileName,
             fileType: f.fileKind,
+            textureUrl: f.textureUrl,
+            matrix: f.matrix,
           })));
           setFileUrl(null);
           setFileName(`Case · ${meshes.length} scan${meshes.length !== 1 ? 's' : ''}`);
@@ -170,6 +172,8 @@ export default function IOSViewerPage() {
             url: f.url,
             fileName: f.fileName,
             fileType: f.fileKind,
+            textureUrl: f.textureUrl,
+            matrix: f.matrix,
           })));
           setFileUrl(null);
           setFileName(`Case · ${arr.length} scan${arr.length !== 1 ? 's' : ''}`);

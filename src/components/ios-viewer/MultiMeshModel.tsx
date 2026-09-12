@@ -16,13 +16,18 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { detectScanRole, ROLE_STYLE, ROLE_TO_SETTING, UNKNOWN_PALETTE } from './utils/roleDetection';
+import { useThree } from '@react-three/fiber';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { isRigidScanMatrix } from '../../lib/sharePayload';
+import { detectScanRole, ROLE_TO_SETTING } from './utils/roleDetection';
 import { computeAutoOrient } from './utils/autoOrient';
 
 export interface MeshFile {
   url: string;
   fileName: string;
   fileType?: string; // 'stl' | 'ply' | 'obj' (defaults to extension parse)
+  textureUrl?: string;
+  matrix?: number[];
 }
 
 /** One row in the per-mesh layer panel. Caller (IOSViewerPage) maintains
@@ -38,6 +43,7 @@ export interface MeshLayer {
 }
 
 export interface ViewerSettingsLite {
+  appearance?: 'natural' | 'original' | 'surface';
   maxillaVisible: boolean;
   maxillaOpacity: number;   // 0..100
   mandibleVisible: boolean;
@@ -58,6 +64,7 @@ interface LoadedMesh {
   role: 'maxilla' | 'mandible' | 'occlusion' | 'unknown';
   fileName: string;
   hasVertexColors: boolean;
+  textureUrl?: string;
 }
 
 function getExt(fileName: string, fileType?: string): string {
@@ -66,7 +73,7 @@ function getExt(fileName: string, fileType?: string): string {
   return m ? m[1] : 'stl';
 }
 
-async function loadOneFile(file: MeshFile): Promise<LoadedMesh> {
+export async function loadOneFile(file: MeshFile): Promise<LoadedMesh> {
   const res = await fetch(file.url);
   if (!res.ok) throw new Error(`HTTP ${res.status} loading ${file.fileName}`);
   const buffer = await res.arrayBuffer();
@@ -106,19 +113,14 @@ async function loadOneFile(file: MeshFile): Promise<LoadedMesh> {
     if (childGeoms.length === 1) {
       geometry = childGeoms[0];
     } else if (childGeoms.length > 1) {
-      // Concatenate positions into one non-indexed BufferGeometry (OBJLoader
-      // output is non-indexed triangle soup, so this is a valid merge).
-      let total = 0;
-      for (const g of childGeoms) total += g.attributes.position.count;
-      const merged = new Float32Array(total * 3);
-      let offset = 0;
+      // Preserve UVs, normals and captured vertex colours across OBJ groups.
+      const common = Object.keys(childGeoms[0].attributes)
+        .filter((name) => childGeoms.every((g) => g.hasAttribute(name)));
       for (const g of childGeoms) {
-        const arr = g.attributes.position.array as ArrayLike<number>;
-        merged.set(arr as Float32Array, offset);
-        offset += g.attributes.position.count * 3;
+        for (const name of Object.keys(g.attributes)) if (!common.includes(name)) g.deleteAttribute(name);
       }
-      geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(merged, 3));
+      geometry = mergeGeometries(childGeoms, false);
+      childGeoms.forEach((g) => g.dispose());
     }
   } else {
     throw new Error(`Unsupported 3D scan format: ${ext}`);
@@ -126,17 +128,52 @@ async function loadOneFile(file: MeshFile): Promise<LoadedMesh> {
 
   if (!geometry) throw new Error(`No mesh found in ${file.fileName}`);
 
-  // Smooth normals from triangle normals (STL ships per-triangle normals
-  // which produce a faceted look when shaded). computeVertexNormals
-  // averages them across shared vertices for a smoother surface.
-  geometry.computeVertexNormals();
+  // Keep scanner normals and millimetres; only the display copy receives the
+  // recorded rigid pose. Never smooth or remodel the measured tooth surface.
+  if (!geometry.hasAttribute('normal')) geometry.computeVertexNormals();
+  hasVertexColors = geometry.hasAttribute('color');
+  if (file.matrix) {
+    if (!isRigidScanMatrix(file.matrix)) { geometry.dispose(); throw new Error('Invalid saved scan alignment'); }
+    geometry.applyMatrix4(new THREE.Matrix4().set(...file.matrix as Parameters<THREE.Matrix4['set']>));
+  }
 
   return {
     geometry,
     role: detectScanRole(file.fileName),
     fileName: file.fileName,
     hasVertexColors,
+    textureUrl: file.textureUrl,
   };
+}
+
+function ScanMesh({ mesh, meshKey, label, visible, opacity, appearance }: {
+  mesh: LoadedMesh; meshKey: string; label: string; visible: boolean;
+  opacity: number; appearance: NonNullable<ViewerSettingsLite['appearance']>;
+}) {
+  const gl = useThree((state) => state.gl);
+  const [map, setMap] = useState<THREE.Texture | null>(null);
+  useEffect(() => {
+    setMap(null);
+    if (!mesh.textureUrl || !mesh.geometry.hasAttribute('uv')) return;
+    let disposed = false;
+    const texture = new THREE.TextureLoader().load(mesh.textureUrl, (loaded) => {
+      loaded.colorSpace = THREE.SRGBColorSpace;
+      loaded.anisotropy = Math.min(8, gl.capabilities.getMaxAnisotropy());
+      if (!disposed) setMap(loaded);
+    }, undefined, () => { if (!disposed) setMap(null); });
+    return () => { disposed = true; texture.dispose(); };
+  }, [mesh.textureUrl, mesh.geometry, gl]);
+  const useMap = appearance !== 'surface' && !!map;
+  const vertexColors = appearance !== 'surface' && !useMap && mesh.hasVertexColors;
+  const captured = useMap || vertexColors;
+  const common = { color: captured ? '#ffffff' : '#e8daca', map: useMap ? map : null,
+    vertexColors, side: THREE.DoubleSide, transparent: opacity < 1, opacity, depthWrite: opacity >= 0.99 };
+  return <mesh geometry={mesh.geometry} visible={visible}
+    userData={{ role: mesh.role, label, layerKey: meshKey }}>
+    {appearance === 'original' && captured
+      ? <meshBasicMaterial key={`capture-${useMap}-${vertexColors}`} {...common} toneMapped={false} />
+      : <meshStandardMaterial key={`lit-${useMap}-${vertexColors}`} {...common} metalness={0} roughness={0.85} />}
+  </mesh>;
 }
 
 interface MultiMeshModelProps {
@@ -171,7 +208,7 @@ function buildLayerLabels(meshes: LoadedMesh[]): MeshLayer[] {
       key: `${m.fileName}-${idx}`,
       label,
       role: m.role,
-      visible: true,
+      visible: m.role !== 'occlusion',
       opacity: 100,
     };
   });
@@ -184,6 +221,7 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
   // Load all files in parallel
   useEffect(() => {
     let cancelled = false;
+    let owned: LoadedMesh[] = [];
     if (!files || files.length === 0) {
       setMeshes([]);
       return;
@@ -196,19 +234,19 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
       return null;
     })))
       .then((results) => {
-        if (cancelled) return;
         const loaded = results.filter(Boolean) as LoadedMesh[];
+        if (cancelled) { loaded.forEach((m) => m.geometry.dispose()); return; }
+        owned = loaded;
 
         // Auto-orient via PCA on the combined point cloud, applied uniformly
         // to all meshes so upper + lower stay registered. Skip if explicitly
         // disabled. Geometry is mutated in place — fine because each load
         // produces fresh BufferGeometry instances.
-        if ((viewerSettings.autoOrient ?? true) && loaded.length > 0) {
+        if (!files.some((f) => f.matrix) && (viewerSettings.autoOrient ?? true) && loaded.length > 0) {
           const { transform, confident } = computeAutoOrient(loaded.map((m) => m.geometry));
           if (confident) {
             for (const m of loaded) {
               m.geometry.applyMatrix4(transform);
-              m.geometry.computeVertexNormals();
               m.geometry.computeBoundingBox();
             }
           }
@@ -220,7 +258,7 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
         onMeshesReady?.(buildLayerLabels(loaded));
       });
 
-    return () => { cancelled = true; };
+    return () => { cancelled = true; owned.forEach((m) => m.geometry.dispose()); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files, onError]);
 
@@ -263,19 +301,6 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
     return c.negate();
   }, [groupBounds]);
 
-  // Per-mesh render color. Named roles keep their themed color; role-'unknown'
-  // meshes (e.g. Fussen TextureMesh<N>_<M> exports, which carry no role in the
-  // filename) each get a distinct palette color so the co-registered segments
-  // are tellable apart and the bite between arches is visible.
-  const meshColors = useMemo(() => {
-    let u = 0;
-    return meshes.map((m) =>
-      m.role === 'unknown'
-        ? UNKNOWN_PALETTE[u++ % UNKNOWN_PALETTE.length]
-        : ROLE_STYLE[m.role].color,
-    );
-  }, [meshes]);
-
   if (meshes.length === 0) return null;
 
   return (
@@ -293,7 +318,6 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
         const opacityPct = layer
           ? layer.opacity
           : ((viewerSettings as any)[setting.opacity] ?? 100);
-        const style = ROLE_STYLE[m.role];
 
         // Per-role isolate (the All / Up / Low / Bite chips). When active,
         // hide everything that doesn't match regardless of layer state.
@@ -301,37 +325,10 @@ export function MultiMeshModel({ files, viewerSettings, onLoaded, onMeshesReady,
         const visible = isolated ? (m.role === isolated) : baseVisible;
 
         return (
-          <mesh
-            key={meshKey}
-            geometry={m.geometry}
-            visible={visible}
-            castShadow
-            receiveShadow
-            // Tag each mesh with its role + label so downstream tools
-            // (occlusal contact map, FDI tooth picker, comparison
-            // overlay) can find them via scene.traverse + userData.
-            userData={{ role: m.role, label: m.label, layerKey: meshKey }}
-          >
-            <meshPhysicalMaterial
-              color={m.hasVertexColors ? 0xffffff : meshColors[idx]}
-              vertexColors={m.hasVertexColors}
-              roughness={style.roughness}
-              metalness={0.05}
-              clearcoat={0.15}              // subtle wet look (saliva-like)
-              clearcoatRoughness={0.4}
-              sheen={0.1}                   // soft surface
-              sheenColor={0xffffff}
-              side={THREE.DoubleSide}
-              // Always transparent so opacity slider responds smoothly.
-              // Toggling .transparent forces three.js to rebuild the
-              // material program — change wasn't applying mid-session.
-              transparent
-              opacity={Math.max(0, Math.min(1, opacityPct / 100))}
-              depthWrite={opacityPct >= 99}
-              emissive={0x000000}
-              emissiveIntensity={style.emissiveIntensity}
-            />
-          </mesh>
+          <ScanMesh key={meshKey} mesh={m} meshKey={meshKey}
+            label={layer?.label || m.fileName} visible={visible}
+            opacity={Math.max(0, Math.min(1, opacityPct / 100))}
+            appearance={viewerSettings.appearance || 'natural'} />
         );
       })}
     </group>

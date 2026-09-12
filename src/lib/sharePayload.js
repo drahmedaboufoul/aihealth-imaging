@@ -65,14 +65,20 @@ export function shareMeshFiles(payload) {
       ? { ...f, textureUrl: matches[0].url } : { ...f };
   });
   // Alternate formats of the same named component are one surface.
-  const selected = new Map();
+  const components = new Map();
   const rank = (f) => f.textureUrl ? 3 : f.fileKind === 'ply' ? 2 : f.fileKind === 'obj' ? 1 : 0;
   for (const file of decorated) {
     const key = stem(file.fileName);
-    const previous = selected.get(key);
-    if (!previous || rank(file) > rank(previous)) selected.set(key, file);
+    const group = components.get(key) || [];
+    group.push(file);
+    components.set(key, group);
   }
-  const result = [...selected.values()];
+  const result = [...components.values()].flatMap((group) => {
+    // Repeated filenames in the same format may be separate acquisitions.
+    // Keep every surface when names alone cannot distinguish the components.
+    if (new Set(group.map((file) => file.fileKind)).size !== group.length) return group;
+    return [group.reduce((best, file) => rank(file) > rank(best) ? file : best)];
+  });
   const alignment = payload?.viewer_annotations?.mesh_alignment;
   if (!alignment?.matrices) return result;
   return result.map((file) => {

@@ -31,6 +31,12 @@ describe('captured scan binding', () => {
     expect(transformed[0].distanceTo(transformed[1])).toBe(8);
     expect(identity).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
   });
+  it('keeps separate acquisitions when the same filename is reused', () => {
+    const first = file('upper.stl', 'acquisition-1');
+    const second = { ...file('upper.stl', 'acquisition-2'), url: 'https://scan.invalid/second/upper.stl' };
+    expect(shareMeshFiles({ files: [first, second, file('upper.obj')] })).toHaveLength(3);
+    expect(shareMeshFiles({ files: [first, second] }).map((f) => f.fileId)).toEqual(['acquisition-1', 'acquisition-2']);
+  });
   it('rejects partial, scaled, reflected and malformed saved poses', () => {
     const files = [file('upper.obj', 'upper'), file('lower.obj', 'lower')];
     expect(() => shareMeshFiles({ files, viewer_annotations: { mesh_alignment: { matrices: { upper: identity } } } })).toThrow('incomplete');

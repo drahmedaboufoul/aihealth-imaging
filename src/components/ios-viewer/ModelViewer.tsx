@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Grid, PerspectiveCamera, Line, Environment } from '@react-three/drei';
+import { OrbitControls, Grid, PerspectiveCamera, Line } from '@react-three/drei';
 import * as THREE from 'three';
 import { toast } from 'sonner';
 import type { Patient, Scan, ViewerSettings, ToolType, MouseSettings } from './types';
@@ -61,6 +61,19 @@ interface ModelViewerProps {
   comparisonFiles?: MeshFile[] | null;
   comparisonOpacity?: number;
   comparisonColor?: string;
+}
+
+// Neutral, camera-relative illumination of the centred scan.
+function ScanLighting() {
+  const rig = useRef<THREE.Group>(null);
+  const target = useMemo(() => new THREE.Object3D(), []);
+  useFrame(({ camera }) => { if (rig.current) rig.current.quaternion.copy(camera.quaternion); });
+  return <group ref={rig}>
+    <primitive object={target} />
+    <hemisphereLight intensity={1.3} color="white" groundColor="white" />
+    <directionalLight target={target} position={[2, 2.5, 3]} intensity={2.3} />
+    <directionalLight target={target} position={[-3, 1, 2]} intensity={1} />
+  </group>;
 }
 
 // File-based 3D Model Component
@@ -129,8 +142,8 @@ function FileModel({
       <meshStandardMaterial
         color={hasVertexColors ? 0xffffff : '#e8daca'}
         vertexColors={hasVertexColors}
-        metalness={0.1}
-        roughness={0.5}
+        metalness={0}
+        roughness={0.85}
         side={THREE.DoubleSide}
         transparent
         opacity={viewerSettings.maxillaOpacity / 100}
@@ -758,13 +771,7 @@ export function ModelViewer({
             gl={{ preserveDrawingBuffer: true, antialias: true, localClippingEnabled: true }}
           >
             <PerspectiveCamera makeDefault position={[0, 0, 4]} fov={45} />
-            <ambientLight intensity={0.45} />
-            <directionalLight position={[5, 5, 5]} intensity={0.75} castShadow />
-            <directionalLight position={[-5, -5, -5]} intensity={0.2} />
-            {/* IBL — gives the meshPhysicalMaterial proper reflections so
-                 enamel doesn't read as flat plastic. Apartment is a soft
-                 indoor preset; doesn't introduce harsh highlights. */}
-            <Environment preset="apartment" background={false} />
+            <ScanLighting />
 
             {isMultiFile ? (
               <MultiMeshModel
@@ -954,10 +961,26 @@ export function ModelViewer({
                 </button>
               </div>
 
+              {isMultiFile && <div className="mb-4">
+                <label htmlFor="scan-appearance" className="block text-xs font-medium text-gray-600 mb-1.5">Appearance</label>
+                <select id="scan-appearance" value={viewerSettings.appearance || 'natural'}
+                  onChange={(event) => onUpdateSettings({ appearance: event.target.value as ViewerSettings['appearance'] })}
+                  className="w-full rounded border border-gray-200 bg-white p-2 text-sm text-gray-800">
+                  <option value="natural">Natural light</option>
+                  <option value="original">Original scan colour</option>
+                  <option value="surface">Surface detail</option>
+                </select>
+                <p className="mt-1.5 text-xs text-gray-500">
+                  {viewerSettings.appearance === 'original' ? 'Captured colour without added shading. Uncoloured scans use a neutral surface.'
+                    : viewerSettings.appearance === 'surface' ? 'Matte shading reveals the scanned surface.'
+                    : 'Soft lighting with the scanner’s captured colour.'}
+                </p>
+              </div>}
+
               {/* Isolate row — quick way to focus on one role without
                    toggling each visibility flag manually. Only meaningful
                    in multi-mesh study mode; harmless otherwise. */}
-              {isMultiFile && (
+              {isMultiFile && viewerSettings.meshLayers?.some((layer) => layer.role !== 'unknown') && (
                 <div className="mb-4">
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 mb-1.5">
                     Isolate
@@ -1134,33 +1157,6 @@ export function ModelViewer({
               <ChevronLeft className="w-4 h-4" />
             </button>
           )}
-        </div>
-      </div>
-
-      {/* Bottom Legend */}
-      <div className="h-16 bg-white border-t border-gray-200 flex items-center justify-center px-4">
-        <div className="flex items-center gap-4">
-          <span className="text-xs text-gray-500">-0.40</span>
-          <div className="w-64 h-4 rounded-full bg-gradient-to-r from-purple-500 via-blue-500 via-green-500 via-yellow-500 to-red-500" />
-          <span className="text-xs text-gray-500">1.20 mm</span>
-        </div>
-        <div className="ml-8 flex items-center gap-4 text-xs text-gray-500">
-          <div className="flex items-center gap-1">
-            <div className="w-3 h-3 rounded-full bg-red-500" />
-            <span>High</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <div className="w-3 h-3 rounded-full bg-yellow-500" />
-            <span>Medium</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <div className="w-3 h-3 rounded-full bg-green-500" />
-            <span>Low</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <div className="w-3 h-3 rounded-full bg-blue-500" />
-            <span>Minimal</span>
-          </div>
         </div>
       </div>
 

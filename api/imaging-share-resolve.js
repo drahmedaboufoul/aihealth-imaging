@@ -72,6 +72,7 @@ export default async function handler(req, res) {
       url: signed?.signedUrl || null,
       fileName: f.original_filename || f.storage_path.split('/').pop(),
       fileKind: f.file_kind,
+      fileId: f.id,
       sopInstanceUid: f.sop_instance_uid,
       fileSize: f.file_size,
     };

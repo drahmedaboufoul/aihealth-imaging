@@ -367,6 +367,7 @@ function CameraAutoFit({ trigger }: { trigger: any }) {
     let attemptsLeft = 10;
     const attempt = () => {
       if (cancelled) return;
+      scene.updateMatrixWorld(true);
       const box = new THREE.Box3();
       scene.traverse((o: any) => {
         if (o.isMesh && o.geometry) {
@@ -389,7 +390,9 @@ function CameraAutoFit({ trigger }: { trigger: any }) {
       box.getBoundingSphere(sphere);
       const radius = sphere.radius;
 
-      const fov = (camera as THREE.PerspectiveCamera).fov * (Math.PI / 180);
+      const verticalFov = (camera as THREE.PerspectiveCamera).fov * (Math.PI / 180);
+      const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * (camera as THREE.PerspectiveCamera).aspect);
+      const fov = Math.min(verticalFov, horizontalFov);
       const distance = (radius / Math.sin(fov / 2)) * 1.4;
 
       const dir = new THREE.Vector3(0, 0, 1);
@@ -402,6 +405,7 @@ function CameraAutoFit({ trigger }: { trigger: any }) {
       if (controls && (controls as any).target) {
         (controls as any).target.copy(center);
         (controls as any).update?.();
+        (controls as any).saveState?.();
       }
     };
     requestAnimationFrame(attempt);
@@ -891,11 +895,14 @@ export function ModelViewer({
                 onClick={() => {
                   const cam = controlsRef.current?.object;
                   if (!cam) return;
+                  const target = controlsRef.current.target.clone();
+                  const distance = Math.max(0.1, cam.position.distanceTo(target));
+                  const direction = new THREE.Vector3(...(preset.pos as [number, number, number])).normalize();
                   flyCameraTo(
                     cam,
                     controlsRef.current,
-                    new THREE.Vector3(...(preset.pos as [number, number, number])),
-                    new THREE.Vector3(0, 0, 0),
+                    target.clone().add(direction.multiplyScalar(distance)),
+                    target,
                   );
                 }}
                 className="px-2.5 py-1 text-[11px] font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-100 rounded-full transition-colors"

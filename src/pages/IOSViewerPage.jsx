@@ -27,6 +27,7 @@ import { useSearchParams, Link, useNavigate, useLocation } from 'react-router-do
 import { Loader2, AlertCircle, ArrowLeft, ExternalLink, GitCompare, X, Share2 } from 'lucide-react';
 import { toast } from 'sonner';
 import ShareInviteDialog from '../components/ShareInviteDialog';
+import { LECTURE_FILES, isLectureFixture } from '../lib/lectureFixture';
 import { resolveSignedUrl, resolveStudyFiles } from '../lib/signedUrl';
 import { readSharePayload, shareMeshFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
 import { ModelViewer } from '../components/ios-viewer/ModelViewer';
@@ -78,7 +79,8 @@ export default function IOSViewerPage() {
   // Left-click is reserved for picking / measurement points.
   const [mouseSettings, setMouseSettings] = useState({ leftRotation: false });
 
-  const isDemo = searchParams.get('demo') === '1';
+  const isLecture = isLectureFixture(searchParams);
+  const isDemo = searchParams.get('demo') === '1' || isLecture;
   const fileId = searchParams.get('id');
   const filePath = searchParams.get('path');
   const queryName = searchParams.get('name');
@@ -98,10 +100,10 @@ export default function IOSViewerPage() {
   // on every keystroke / tool click and re-shows the loading overlay.
   const patient = useMemo(() => ({
     id: fileId || 'P001',
-    name: queryName || (isDemo ? 'Demo Patient' : 'Patient'),
+    name: isLecture ? 'Teaching model' : queryName || (isDemo ? 'Demo Patient' : 'Patient'),
     gender: 'male',
     age: 30,
-  }), [fileId, queryName, isDemo]);
+  }), [fileId, queryName, isDemo, isLecture]);
 
   const scan = useMemo(() => ({
     id: fileId || 'S001',
@@ -121,6 +123,14 @@ export default function IOSViewerPage() {
       setLoading(true);
       setError(null);
       try {
+        if (isLecture) {
+          if (cancelled) return;
+          setFiles(LECTURE_FILES.map(file => ({ ...file })));
+          setFileUrl(null);
+          setFileName('Teaching scan');
+          setHud(null);
+          return;
+        }
         // Shared session: the token was already validated server-side and
         // the payload carries pre-signed URLs — no Supabase auth needed.
         if (shareKey) {
@@ -211,7 +221,7 @@ export default function IOSViewerPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [fileId, filePath, queryName, isDemo, studyId, shareKey, sharePayload]);
+  }, [fileId, filePath, queryName, isDemo, isLecture, studyId, shareKey, sharePayload]);
 
   if (loading) {
     return (
@@ -362,7 +372,7 @@ export default function IOSViewerPage() {
       {isDemo && (
         <div className="absolute top-2 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
           <div className="bg-accent text-bg text-[11px] font-medium px-3 py-1 rounded-full shadow-lg">
-            DEMO MODE — built-in mock mesh (visibility toggles + tools wired)
+            {isLecture ? 'Kyour imaging · teaching scan' : 'DEMO MODE — built-in mock mesh (visibility toggles + tools wired)'}
           </div>
         </div>
       )}

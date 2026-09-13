@@ -21,6 +21,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { isRigidScanMatrix } from '../../lib/sharePayload';
 import { detectScanRole, ROLE_TO_SETTING } from './utils/roleDetection';
 import { computeAutoOrient } from './utils/autoOrient';
+import { normalizeObjVertexColors } from '../../lib/objVertexColors';
 
 export interface MeshFile {
   url: string;
@@ -92,7 +93,7 @@ export async function loadOneFile(file: MeshFile): Promise<LoadedMesh> {
   } else if (ext === 'obj') {
     const { OBJLoader } = await import('three/examples/jsm/loaders/OBJLoader');
     const text = new TextDecoder().decode(buffer);
-    const obj = new OBJLoader().parse(text);
+    const obj = new OBJLoader().parse(normalizeObjVertexColors(text));
     obj.updateMatrixWorld(true);
     // OBJLoader splits a textured/multi-material OBJ into one child mesh per
     // material group. Grabbing only the first child silently drops the rest of

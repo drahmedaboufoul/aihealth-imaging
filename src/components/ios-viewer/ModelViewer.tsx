@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid, PerspectiveCamera, Line } from '@react-three/drei';
 import * as THREE from 'three';
+import { normalizeObjVertexColors } from '../../lib/objVertexColors';
 import { toast } from 'sonner';
 import type { Patient, Scan, ViewerSettings, ToolType, MouseSettings } from './types';
 import { MultiMeshModel, type MeshFile } from './MultiMeshModel';
@@ -114,7 +115,7 @@ function FileModel({
         } else if (ext === 'obj') {
           const { OBJLoader } = await import('three/examples/jsm/loaders/OBJLoader');
           const text = new TextDecoder().decode(arrayBuffer);
-          const obj = new OBJLoader().parse(text);
+          const obj = new OBJLoader().parse(normalizeObjVertexColors(text));
           obj.traverse((child) => {
             if (child instanceof THREE.Mesh && !loadedGeometry) {
               loadedGeometry = child.geometry;

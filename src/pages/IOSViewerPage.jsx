@@ -374,6 +374,7 @@ export default function IOSViewerPage() {
           <div className="bg-accent text-bg text-[11px] font-medium px-3 py-1 rounded-full shadow-lg">
             {isLecture ? 'Kyour imaging · teaching scan' : 'DEMO MODE — built-in mock mesh (visibility toggles + tools wired)'}
           </div>
+          {isLecture && <a className="block pointer-events-auto text-center text-[10px] text-blue-600" href="https://www.dentsplysirona.com/en-in/discover/discover-by-topic/by-category/dental-laboratory/digital-impression-for-dental-lab.html" target="_blank" rel="noreferrer">Primescan public colour sample ↗</a>}
         </div>
       )}
       {/* Patient HUD — top-right corner. Shows whose scan this is +

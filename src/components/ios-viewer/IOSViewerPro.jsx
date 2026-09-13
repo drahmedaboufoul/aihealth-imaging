@@ -6,6 +6,7 @@ import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid, Center } from '@react-three/drei';
 import * as THREE from 'three';
+import { normalizeObjVertexColors } from '../../lib/objVertexColors';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import {
@@ -63,7 +64,7 @@ function ScanMesh({ url, type, onLoad, onError }) {
         } else if (ext === 'obj') {
           const { OBJLoader } = await import('three/examples/jsm/loaders/OBJLoader');
           const text = new TextDecoder().decode(arrayBuffer);
-          const obj = new OBJLoader().parse(text);
+          const obj = new OBJLoader().parse(normalizeObjVertexColors(text));
           obj.traverse((child) => {
             if (child.isMesh && !geo) geo = child.geometry;
           });

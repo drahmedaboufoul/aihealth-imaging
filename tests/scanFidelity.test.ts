@@ -50,6 +50,17 @@ describe('captured scan binding', () => {
 
 describe('OBJ surface fidelity', () => {
   afterEach(() => vi.unstubAllGlobals());
+  it('loads byte RGB as captured colour without changing the source geometry', async () => {
+    const obj='v 1 2 3 110 62 56\nv 4 5 6 255 180 0\nv 7 8 9 102 61 55\nf 1 2 3\n';
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,arrayBuffer:async()=>new TextEncoder().encode(obj).buffer}));
+    const loaded=await loadOneFile({url:'https://scan.invalid/model.obj',fileName:'upper.obj'});
+    expect(loaded.hasVertexColors).toBe(true);
+    expect(Array.from(loaded.geometry.getAttribute('position').array)).toEqual([1,2,3,4,5,6,7,8,9]);
+    const expected=new THREE.Color().setRGB(110/255,62/255,56/255,THREE.SRGBColorSpace);
+    expect(loaded.geometry.getAttribute('color').getX(0)).toBeCloseTo(expected.r,6);
+    expect(Math.max(...loaded.geometry.getAttribute('color').array)).toBeLessThanOrEqual(1);
+    loaded.geometry.dispose();
+  });
   it('retains both child surfaces, UVs and captured normals under a rigid pose', async () => {
     const obj = 'v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 2\nv 1 0 2\nv 0 1 2\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 -1\no upper\nf 1/1/1 2/2/1 3/3/1\no lower\nf 4/1/1 5/2/1 6/3/1\n';
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, arrayBuffer: async () => new TextEncoder().encode(obj).buffer }));

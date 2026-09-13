@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader';
+import { normalizeObjVertexColors } from '../../../lib/objVertexColors';
 
 /**
  * Load a 3D model from URL
@@ -64,7 +65,7 @@ const loadPLY = (arrayBuffer) => {
 const loadOBJ = (arrayBuffer) => {
   const text = new TextDecoder().decode(arrayBuffer);
   const loader = new OBJLoader();
-  const object = loader.parse(text);
+  const object = loader.parse(normalizeObjVertexColors(text));
 
   // Extract geometry from OBJ
   let geometry = null;

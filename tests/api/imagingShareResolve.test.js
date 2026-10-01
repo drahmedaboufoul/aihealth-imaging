@@ -183,6 +183,7 @@ describe('imaging-share-resolve — happy path', () => {
     expect(res.body.permission).toBe('view');
     expect(res.body.files).toHaveLength(2);
     expect(res.body.files[0].url).toBe('https://signed.test/imaging/study-1/001.dcm');
+    expect(res.body.files[0].fileId).toBe('f1');
     // Falls back to the storage key basename when original_filename is null
     expect(res.body.files[1].fileName).toBe('002.dcm');
     expect(res.body.niftiUrl).toBeNull(); // nifti not ready

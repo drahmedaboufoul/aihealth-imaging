@@ -24,6 +24,8 @@ export interface Scan {
 export type IsolatedRole = 'maxilla' | 'mandible' | 'occlusion' | null;
 
 export interface ViewerSettings {
+  appearance?: 'natural' | 'original' | 'surface';
+  meshLayers?: import('./MultiMeshModel').MeshLayer[];
   maxillaVisible: boolean;
   maxillaOpacity: number;
   mandibleVisible: boolean;

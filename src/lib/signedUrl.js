@@ -9,6 +9,7 @@
  */
 
 import { supabase } from './supabase';
+import { shareMeshFiles } from './sharePayload';
 
 const DEFAULT_BUCKET = 'patient-files';
 const IMAGING_BUCKET = 'imaging';
@@ -63,7 +64,6 @@ export async function resolveStudyFiles(studyId) {
     .from('imaging_files')
     .select('id, storage_path, original_filename, file_kind, content_type, file_size')
     .eq('study_id', studyId)
-    .in('file_kind', SCAN_KINDS)
     .order('created_at', { ascending: true });
 
   if (error) throw new Error(`imaging_files lookup failed: ${error.message}`);
@@ -73,7 +73,11 @@ export async function resolveStudyFiles(studyId) {
 
   // Sign every storage_path in parallel. Partial failure is allowed —
   // the viewer should render whatever loaded successfully.
-  const signed = await Promise.all(rows.map(async (row) => {
+  const scanRows = rows.filter((row) => SCAN_KINDS.includes(row.file_kind) || /\.(jpe?g|png)$/i.test(row.original_filename || ''));
+  const { data: study, error: studyError } = await supabase.from('imaging_studies')
+    .select('viewer_annotations').eq('id', studyId).single();
+  if (studyError) throw new Error(`Scan alignment lookup failed: ${studyError.message}`);
+  const signed = await Promise.all(scanRows.map(async (row) => {
     const { data, error: sErr } = await supabase
       .storage
       .from(IMAGING_BUCKET)
@@ -93,7 +97,7 @@ export async function resolveStudyFiles(studyId) {
 
   const ok = signed.filter(Boolean);
   if (ok.length === 0) throw new Error(`Could not sign any files for study ${studyId}`);
-  return ok;
+  return shareMeshFiles({ files: ok, viewer_annotations: study?.viewer_annotations });
 }
 
 /**

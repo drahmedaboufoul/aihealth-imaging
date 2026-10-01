@@ -94,8 +94,8 @@ export const useIOSViewerStore = create((set, get) => ({
   },
   materialSettings: {
     color: '#e8daca',
-    metalness: 0.1,
-    roughness: 0.5,
+    metalness: 0,
+    roughness: 0.85,
     wireframe: false,
     opacity: 1.0,
     transparent: false
@@ -426,8 +426,8 @@ export const useIOSViewerStore = create((set, get) => ({
     background: { color: '#1a1a2e', isDark: true },
     materialSettings: {
       color: '#e8daca',
-      metalness: 0.1,
-      roughness: 0.5,
+      metalness: 0,
+      roughness: 0.85,
       wireframe: false,
       opacity: 1.0,
       transparent: false

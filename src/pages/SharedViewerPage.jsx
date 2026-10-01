@@ -99,7 +99,7 @@ export default function SharedViewerPage() {
         className="flex items-center justify-between px-3 py-1.5 border-b border-separator-s1 bg-background-secondary text-labels-primary text-xs"
       >
         <div className="flex items-center gap-3">
-          <span className="font-bold text-accent uppercase tracking-wider text-xs">Shared session</span>
+          <span className="font-semibold text-accent text-xs">Kyour.ai <span className="hidden sm:inline">· Imaging Interpreter</span></span>
           <span className="text-labels-secondary">
             {study?.patient_name && <span>{study.patient_name} · </span>}
             {studyType?.replace(/_/g, ' ')} · {study?.study_date && new Date(study.study_date).toLocaleDateString('en-GB')}

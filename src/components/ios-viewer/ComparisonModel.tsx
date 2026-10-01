@@ -23,6 +23,7 @@ import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { normalizeObjVertexColors } from '../../lib/objVertexColors';
 import type { MeshFile } from './MultiMeshModel';
 
 interface ComparisonModelProps {
@@ -67,7 +68,7 @@ export default function ComparisonModel({
             geo = new PLYLoader().parse(buf as ArrayBuffer);
           } else if (ext === 'obj') {
             const txt = new TextDecoder().decode(new Uint8Array(buf));
-            const root = new OBJLoader().parse(txt);
+            const root = new OBJLoader().parse(normalizeObjVertexColors(txt));
             // Pull the first sub-mesh's geometry
             root.traverse((o: any) => {
               if (o.isMesh && o.geometry && !geo) geo = o.geometry as THREE.BufferGeometry;

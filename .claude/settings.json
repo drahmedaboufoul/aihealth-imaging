@@ -1,0 +1,70 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/deja.sh\" hook-context",
+            "timeout": 90,
+            "statusMessage": "Recalling past sessions…"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/deja.sh\" hook-prompt",
+            "timeout": 10,
+            "statusMessage": "Searching past sessions…"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/deja.sh\" hook-tool",
+            "timeout": 10,
+            "statusMessage": "Checking what this touches…"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/deja.sh\" hook-tool-after",
+            "timeout": 10,
+            "statusMessage": "Checking what fixed this before…"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/deja.sh\" hook-precompact",
+            "timeout": 10,
+            "statusMessage": "Saving this session to memory…"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "deja"
+  ]
+}

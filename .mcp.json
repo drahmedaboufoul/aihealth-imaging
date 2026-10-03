@@ -14,6 +14,14 @@
         "-c",
         "exec sh \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/deja.sh\" mcp"
       ]
+    },
+    "watch": {
+      "type": "stdio",
+      "command": "sh",
+      "args": [
+        "-c",
+        "exec sh \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/watch.sh\" mcp"
+      ]
     }
   }
 }

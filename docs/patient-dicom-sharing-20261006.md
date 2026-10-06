@@ -24,7 +24,8 @@ Source pixels, modality rescaling, source VOI and presentation remain with Corne
 
 ## Validation and limits
 
-- `npm test -- --maxWorkers=2`: 209 tests in 16 files passed, including 317 synthetic instances, patient release/revoke races, manifest mismatch, CBCT selection, batch signing, frame expansion, geometry, duplicate descriptions and cached access expiry.
+- `npm test -- --maxWorkers=2`: 216 tests in 17 files passed, including 317 synthetic instances, patient release/revoke races, manifest mismatch, CBCT selection, batch signing, frame expansion, geometry, duplicate descriptions and cached access expiry.
+- `npm run test:e2e`: all three browser tests passed. A generated three-instance DICOM stack exercises the real Radix slider and Cornerstone viewer: Home then Right advances from slice 1 to 2; window and series controls retain keyboard ownership. Restoring the old global handler makes this regression fail with slice 3, confirming it detects the reported bug. Sliders expose their actual semantic labels.
 - `npm run build`: passed using synthetic loopback public client configuration. Existing large-chunk, codec browser-externalization and mixed-loader warnings remain.
 - `npx tsc --noEmit`: fails with 14 unresolved import errors in untouched IOS components (`@/types`, `@/data/mockData`, UI modules and three loader declarations). The project does not currently provide a typecheck script. This draft does not claim a clean full typecheck.
 

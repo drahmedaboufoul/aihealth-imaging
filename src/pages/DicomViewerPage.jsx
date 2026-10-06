@@ -30,6 +30,7 @@ import {
 } from '../components/viewer/viewerToolConfig';
 import { resolveSignedUrl, resolveStudyDicomFiles } from '../lib/signedUrl';
 import { initCornerstone, imageIdFromSignedUrl, cornerstone, cornerstoneTools } from '../lib/cornerstoneInit';
+import { shouldIgnoreViewerHotkey } from '../lib/viewerKeyboard';
 import { formatPatientName, formatDate } from '../lib/dicomFormat';
 import { readSharePayload, shareDicomSeries, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
 import { severityColor, typeLabel, anchorFindingToWorld, projectAnchoredBox } from '../lib/aiOverlay';
@@ -566,7 +567,7 @@ export default function DicomViewerPage() {
   useEffect(() => {
     if (imageIds.length <= 1) return;
     const onKey = (e) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (shouldIgnoreViewerHotkey(e)) return;
       const N = imageIds.length;
       let next = instanceIdx;
       if (e.key === 'ArrowDown' || e.key === 'ArrowRight') next = Math.min(N - 1, instanceIdx + 1);
@@ -588,8 +589,7 @@ export default function DicomViewerPage() {
   useEffect(() => {
     if (stage !== 'ready') return;
     const onKey = (e) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (shouldIgnoreViewerHotkey(e)) return;
       const byHotkey = DICOM_LEFT_TOOLS.find((t) => t.hotkey === e.key);
       const lower = e.key.toLowerCase();
       if (byHotkey) {

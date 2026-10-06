@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils"
  * Consumed through `ViewerSlider` (components/viewer/controls.jsx) which
  * adds the label + value readout row.
  */
-const Slider = React.forwardRef(({ className, ...props }, ref) => (
+const Slider = React.forwardRef(({ className, thumbLabel = "Slider value", ...props }, ref) => (
   <SliderPrimitive.Root
     ref={ref}
     className={cn("relative flex h-5 w-full touch-none select-none items-center", className)}
@@ -19,7 +19,7 @@ const Slider = React.forwardRef(({ className, ...props }, ref) => (
       <SliderPrimitive.Range className="absolute h-full bg-accent" />
     </SliderPrimitive.Track>
     <SliderPrimitive.Thumb
-      aria-label="Slider value"
+      aria-label={thumbLabel}
       className="block h-4 w-4 rounded-full border-2 border-accent bg-background-primary transition-[box-shadow,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary disabled:pointer-events-none disabled:opacity-50" />
   </SliderPrimitive.Root>
 ))

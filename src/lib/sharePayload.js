@@ -1,10 +1,12 @@
+import { dicomStudySeries, dicomFrameIds } from './dicomSeries';
+
 /*
  * sharePayload — client half of the tokenized share flow.
  *
  * SharedViewerPage (/viewer/share/:token) resolves the invite through
  * /api/imaging-share-resolve (expiry / revoke / view-count checks happen
  * server-side), stashes the response in sessionStorage under
- * `share-<token8>`, and iframes the real viewer with
+ * a random per-resolution key, and iframes the real viewer with
  * `?share=<key>&readonly=1`. The iframe is same-origin, so it shares the
  * tab's sessionStorage.
  *
@@ -32,16 +34,32 @@ export function readSharePayload(shareKey) {
     if (!raw) return null;
     const payload = JSON.parse(raw);
     if (!payload || typeof payload !== 'object' || !payload.study) return null;
+    if (!(Date.parse(payload.signed_urls_expires_at) > Date.now())) return null;
     return payload;
   } catch {
     return null;
   }
 }
 
-/** DICOM instances from a share payload, in SOP-instance order (the API
- *  already sorts); shape-compatible with resolveStudyDicomFiles(). */
+/** DICOM instances from a share payload, in authorized manifest order (group and sort before display); shape-compatible with resolveStudyDicomFiles(). */
 export function shareDicomFiles(payload) {
-  return (payload?.files || []).filter((f) => f.fileKind === 'dicom' && f.url);
+  return (payload?.files || []).filter((f) => ['dicom', 'dcm'].includes(f.fileKind) && f.url);
+}
+
+/** Keep all authorized series; map immutable file identity to signed access. */
+export function shareDicomSeries(payload) {
+  const dicoms = shareDicomFiles(payload);
+  if (new Set(dicoms.map(f => f.fileId)).size !== dicoms.length || dicoms.some(f => !f.fileId)) {
+    throw new Error('Shared DICOM file identities are incomplete. Reopen the share.');
+  }
+  const byId = new Map(dicoms.map(file => [file.fileId, file]));
+  return dicomStudySeries(dicoms.map(f => ({
+    id: f.fileId, storage_path: f.fileId, original_filename: f.fileName,
+    series_instance_uid: f.seriesInstanceUid, sop_instance_uid: f.sopInstanceUid,
+    series_number: f.seriesNumber, series_description: f.seriesDescription,
+    instance_number: f.instanceNumber, dicom_acquisition: f.dicomAcquisition,
+  }))).map(group => ({ ...group, frames: dicomFrameIds(group.files,
+    group.files.map(file => ({ path: file.storage_path, signedUrl: byId.get(file.id)?.url }))) }));
 }
 
 /** Mesh files (STL/PLY/OBJ) from a share payload; shape-compatible with

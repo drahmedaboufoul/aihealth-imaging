@@ -31,7 +31,7 @@ import {
 import { resolveSignedUrl, resolveStudyDicomFiles } from '../lib/signedUrl';
 import { initCornerstone, imageIdFromSignedUrl, cornerstone, cornerstoneTools } from '../lib/cornerstoneInit';
 import { formatPatientName, formatDate } from '../lib/dicomFormat';
-import { readSharePayload, shareDicomFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
+import { readSharePayload, shareDicomSeries, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
 import { severityColor, typeLabel, anchorFindingToWorld, projectAnchoredBox } from '../lib/aiOverlay';
 import { serialize2DState, apply2DState } from '../lib/viewerRoom';
 import { useViewerRoom } from '../hooks/useViewerRoom';
@@ -94,10 +94,13 @@ export default function DicomViewerPage() {
   const [stage, setStage] = useState('init'); // init | fetching | rendering | ready | error
   const [error, setError] = useState(null);
   const [imageIds, setImageIds] = useState([]);
+  const [seriesOptions, setSeriesOptions] = useState([]);
+  const [selectedSeries, setSelectedSeries] = useState('');
   const [instanceIdx, setInstanceIdx] = useState(0);
   const [imageMeta, setImageMeta] = useState(null); // metadata of current image
   const [windowCenter, setWindowCenter] = useState(40);
   const [windowWidth,  setWindowWidth]  = useState(400);
+  const [windowBounds, setWindowBounds] = useState({ minCenter: -1000, maxCenter: 3000, maxWidth: 4000 });
   const [invert, setInvert] = useState(false);
   const [activeTool, setActiveTool] = useState(DICOM_DEFAULT_TOOL);
   // rotation in degrees (0/90/180/270) + flips, applied via setViewPresentation
@@ -122,7 +125,7 @@ export default function DicomViewerPage() {
   const roomStudyId = studyId || sharePayload?.study?.id || null;
   const [goLive, setGoLive] = useState(false);
   const applyingRemoteRef = useRef(false); // guard so applied frames don't echo
-  const roomRole = readOnly ? 'follower' : (goLive ? 'operator' : null);
+  const roomRole = sharePayload?.source === 'patient' ? null : readOnly ? 'follower' : (goLive ? 'operator' : null);
 
   const onRemoteState = useCallback((s) => {
     applyingRemoteRef.current = true;
@@ -172,10 +175,12 @@ export default function DicomViewerPage() {
         // the payload carries pre-signed URLs — no Supabase auth needed.
         if (shareKey) {
           if (!sharePayload) throw new Error(SHARE_EXPIRED_MESSAGE);
-          const dicoms = shareDicomFiles(sharePayload);
-          if (dicoms.length === 0) throw new Error('This shared study has no DICOM files.');
+          const groups = shareDicomSeries(sharePayload);
+          if (groups.length === 0) throw new Error('This shared study has no DICOM files.');
           if (cancelled) return;
-          setImageIds(dicoms.map((f) => imageIdFromSignedUrl(f.url)));
+          const selected = groups.find(group => group.uid === selectedSeries) || groups[0];
+          setSeriesOptions(groups);
+          setImageIds(selected.frames.map(frame => frame.imageId));
           setInstanceIdx(0);
           return;
         }
@@ -211,14 +216,17 @@ export default function DicomViewerPage() {
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileId, filePath, studyId, isDemo, shareKey, sharePayload]);
+  }, [fileId, filePath, studyId, isDemo, shareKey, sharePayload, selectedSeries]);
 
   // Initialise Cornerstone + create viewport once imageIds resolved
   useEffect(() => {
     if (imageIds.length === 0) return;
     let cancelled = false;
+    let dispose = () => {};
+    const engineId = `${RENDERING_ENGINE_ID}-${crypto.randomUUID()}`;
     (async () => {
       setStage('rendering');
+      setWindowBounds({ minCenter: -1000, maxCenter: 3000, maxWidth: 4000 });
       try {
         await initCornerstone();
         if (cancelled) return;
@@ -226,12 +234,13 @@ export default function DicomViewerPage() {
         const element = viewportContainerRef.current;
         if (!element) return;
 
-        // Reuse rendering engine across re-mounts if possible
-        let engine = cornerstone.getRenderingEngine(RENDERING_ENGINE_ID);
+        // Each series owns its engine; dispose it before the next stack loads.
+        let engine = cornerstone.getRenderingEngine(engineId);
         if (!engine) {
-          engine = new cornerstone.RenderingEngine(RENDERING_ENGINE_ID);
+          engine = new cornerstone.RenderingEngine(engineId);
         }
         renderingEngineRef.current = engine;
+        dispose = () => { engine.destroy(); };
 
         // Enable element as a STACK viewport
         engine.enableElement({
@@ -243,6 +252,9 @@ export default function DicomViewerPage() {
         viewportRef.current = viewport;
 
         await viewport.setStack(imageIds, 0);
+        if (cancelled) return;
+        viewport.resetCamera();
+        viewport.resetProperties();
         viewport.render();
 
         // Set up tool group + bindings (idempotent: destroy if already exists)
@@ -276,7 +288,7 @@ export default function DicomViewerPage() {
         // right-drag = W/L, middle-drag = pan, left-drag = selected tool).
         toolGroup.setToolActive(cornerstoneTools.StackScrollTool.toolName);
 
-        toolGroup.addViewport(VIEWPORT_ID, RENDERING_ENGINE_ID);
+        toolGroup.addViewport(VIEWPORT_ID, engineId);
 
         // Listen for image changes so the slice slider + HUD stay synced
         const handleImageRendered = () => {
@@ -290,6 +302,13 @@ export default function DicomViewerPage() {
             const upper = props.voiRange.upper;
             setWindowCenter(Math.round((lower + upper) / 2));
             setWindowWidth(Math.round(upper - lower));
+            // Retain source and previously visited ranges when a user narrows
+            // the window; the slider must still be able to return to them.
+            setWindowBounds(bounds => ({
+              minCenter: Math.min(bounds.minCenter, Math.floor((lower + upper) / 2)),
+              maxCenter: Math.max(bounds.maxCenter, Math.ceil((lower + upper) / 2)),
+              maxWidth: Math.max(bounds.maxWidth, Math.ceil(upper - lower)),
+            }));
           }
           // Pull metadata for HUD
           const imageId = v.getCurrentImageId();
@@ -315,13 +334,16 @@ export default function DicomViewerPage() {
 
         element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED, handleImageRendered);
         // Trigger a synthetic refresh of the HUD after first render
-        setTimeout(handleImageRendered, 100);
+        const hudTimer = setTimeout(handleImageRendered, 100);
 
         setStage('ready');
 
         // Cleanup: detach listener on unmount or re-init
-        return () => {
+        dispose = () => {
+          clearTimeout(hudTimer);
           element.removeEventListener(cornerstone.Enums.Events.IMAGE_RENDERED, handleImageRendered);
+          cornerstoneTools.ToolGroupManager.destroyToolGroup(TOOL_GROUP_ID);
+          engine.destroy();
         };
       } catch (err) {
         if (cancelled) return;
@@ -330,7 +352,7 @@ export default function DicomViewerPage() {
         setStage('error');
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; dispose(); };
   }, [imageIds]);
 
   // Re-bind mouse buttons whenever the selected left-click tool changes.
@@ -607,6 +629,15 @@ export default function DicomViewerPage() {
             {imageIds.length > 1 && <span className="ml-2 text-xs text-labels-tertiary font-normal">({imageIds.length} slices)</span>}
           </div>
         )}
+        {shareKey && seriesOptions.length > 0 && <label className="text-xs flex items-center gap-2">
+          Series
+          <select aria-label="DICOM series" className="bg-background-secondary border border-separator-s1 rounded p-1 max-w-xs"
+            value={seriesOptions.some(group => group.uid === selectedSeries) ? selectedSeries : seriesOptions[0].uid}
+            onChange={event => setSelectedSeries(event.target.value)}>
+            {seriesOptions.map(group => <option key={group.uid} value={group.uid}>{group.label} | {group.files.length} instances | {group.ordering}</option>)}
+          </select>
+          <span>{imageIds.length} frames</span>
+        </label>}
         <div className="flex items-center gap-2">
           {/* Follower: show when an operator is presenting live. */}
           {stage === 'ready' && readOnly && roomStudyId && operatorPresent && (
@@ -817,8 +848,8 @@ export default function DicomViewerPage() {
           <div className="mb-3">
             <ViewerSlider
               label="Window Center"
-              min={-1000}
-              max={3000}
+              min={windowBounds.minCenter}
+              max={windowBounds.maxCenter}
               value={Math.round(windowCenter)}
               onChange={(v) => onWindowChange(v, windowWidth)}
             />
@@ -828,7 +859,7 @@ export default function DicomViewerPage() {
             <ViewerSlider
               label="Window Width"
               min={1}
-              max={4000}
+              max={windowBounds.maxWidth}
               value={Math.round(windowWidth)}
               onChange={(v) => onWindowChange(windowCenter, v)}
             />
@@ -838,11 +869,11 @@ export default function DicomViewerPage() {
             <div className="mb-3">
               <ViewerSlider
                 label="Slice"
-                min={0}
-                max={imageIds.length - 1}
-                value={instanceIdx}
+                min={1}
+                max={imageIds.length}
+                value={instanceIdx + 1}
                 unit={` / ${imageIds.length}`}
-                onChange={onSliceChange}
+                onChange={value => onSliceChange(value - 1)}
               />
               <p className="text-xs text-labels-tertiary mt-1 leading-snug">
                 Wheel scrolls; ↑/↓ one slice; PgUp/PgDn ten.

@@ -14,15 +14,18 @@
  */
 
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { Loader2, AlertCircle, Lock, Download } from 'lucide-react';
+import { useParams } from 'react-router-dom';
+import { Loader2, Lock, Download } from 'lucide-react';
 
 export default function SharedViewerPage() {
   const { token } = useParams();
-  const navigate = useNavigate();
   const [state, setState] = useState({ stage: 'loading', payload: null, error: null });
 
   useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    const key = `share-${crypto.randomUUID()}`;
+    setState({ stage: 'loading', payload: null, error: null });
     if (!token) return;
     (async () => {
       try {
@@ -30,22 +33,28 @@ export default function SharedViewerPage() {
         // Vercel project, not the EMR (the EMR is SSO-walled).
         const resp = await fetch(`/api/imaging-share-resolve`, {
           method: 'POST',
+          signal: controller.signal,
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ token }),
         });
         const body = await resp.json();
+        if (!active) return;
         if (!resp.ok) {
           setState({ stage: 'error', payload: null, error: body?.error || `Status ${resp.status}` });
           return;
         }
-        setState({ stage: 'ready', payload: body, error: null });
+        if (!(Date.parse(body.signed_urls_expires_at) > Date.now())) throw new Error('Shared access has expired. Reopen the link.');
+        sessionStorage.setItem(key, JSON.stringify(body));
+        setState({ stage: 'ready', token, shareKey: key, payload: body, error: null });
       } catch (e) {
+        if (!active) return;
         setState({ stage: 'error', payload: null, error: e?.message || String(e) });
       }
     })();
+    return () => { active = false; controller.abort(); sessionStorage.removeItem(key); };
   }, [token]);
 
-  if (state.stage === 'loading') {
+  if (state.stage === 'loading' || (state.stage === 'ready' && state.token !== token)) {
     return (
       <div className="h-screen w-screen bg-bg flex items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-muted">
@@ -73,16 +82,13 @@ export default function SharedViewerPage() {
     );
   }
 
-  const { study, files, niftiUrl, permission, expires_at } = state.payload;
+  const { study, niftiUrl, permission, expires_at } = state.payload;
   const studyType = study?.study_type;
 
   // Forward to the actual viewer route in read-only mode, passing the
   // resolved data via sessionStorage so we don't bake PHI in URL params.
   // Each viewer reads `?share=<key>` and pulls payload from session.
-  const shareKey = `share-${token.slice(0, 8)}`;
-  if (typeof window !== 'undefined') {
-    try { sessionStorage.setItem(shareKey, JSON.stringify(state.payload)); } catch {}
-  }
+  const shareKey = state.shareKey;
 
   // Pick viewer route by modality
   let viewerRoute = null;

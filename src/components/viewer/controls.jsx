@@ -90,6 +90,7 @@ export function ViewerSlider({ label, icon: Icon, value, min, max, step = 1, uni
         </span>
       </div>
       <Slider
+        thumbLabel={label}
         value={[Number(value)]}
         min={min}
         max={max}

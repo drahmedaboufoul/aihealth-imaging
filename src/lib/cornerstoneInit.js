@@ -38,6 +38,8 @@ import {
 } from '@cornerstonejs/tools';
 import { init as dicomImageLoaderInit, wadouri, wadors } from '@cornerstonejs/dicom-image-loader';
 
+import { installDicomInflater } from './dicomInflation';
+
 let initialized = false;
 
 export async function initCornerstone() {
@@ -45,6 +47,7 @@ export async function initCornerstone() {
 
   // Core init — registers the default streaming-image volume loader, sets up
   // GPU detection, allocates the rendering engine cache.
+  installDicomInflater();
   await csInit();
   // Tools init — required before adding any tools to a tool group.
   await toolsInit();

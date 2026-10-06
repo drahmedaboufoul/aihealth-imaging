@@ -24,9 +24,20 @@ Source pixels, modality rescaling, source VOI and presentation remain with Corne
 
 ## Validation and limits
 
-- `npm test -- --maxWorkers=2`: 216 tests in 17 files passed, including 317 synthetic instances, patient release/revoke races, manifest mismatch, CBCT selection, batch signing, frame expansion, geometry, duplicate descriptions and cached access expiry.
-- `npm run test:e2e`: all three browser tests passed. A generated three-instance DICOM stack exercises the real Radix slider and Cornerstone viewer: Home then Right advances from slice 1 to 2; window and series controls retain keyboard ownership. Restoring the old global handler makes this regression fail with slice 3, confirming it detects the reported bug. Sliders expose their actual semantic labels.
+- `npm test -- --maxWorkers=2`: 221 tests in 18 files passed, including 317 synthetic instances, patient release/revoke races, manifest mismatch, CBCT selection, batch signing, frame expansion, geometry, duplicate descriptions and cached access expiry.
+- `npm run test:e2e`: all four browser tests passed. A generated three-instance DICOM stack exercises the real Radix slider and Cornerstone viewer: Home then Right advances from slice 1 to 2; window and series controls retain keyboard ownership. Restoring the old global handler makes this regression fail with slice 3, confirming it detects the reported bug. Sliders expose their actual semantic labels.
 - `npm run build`: passed using synthetic loopback public client configuration. Existing large-chunk, codec browser-externalization and mixed-loader warnings remain.
 - `npx tsc --noEmit`: fails with 14 unresolved import errors in untouched IOS components (`@/types`, `@/data/mockData`, UI modules and three loader declarations). The project does not currently provide a typecheck script. This draft does not claim a clean full typecheck.
 
 Full viewer access still requires a viewport at least 1024 pixels wide. Patient portal previews are a separate clinic feature; mobile full-viewer support was not validated. Legacy records without acquisition metadata remain one frame per file. Enhanced per-frame geometry, all transfer syntaxes, DICOMDIR reference traversal, and universal DICOM support are not certified by these tests. A manifest exceeding the server's configured source-row response limit is rejected as incomplete rather than partially shown. Live authentication, end-to-end patient release and clinical interpretation require release verification with authorized staff; synthetic tests do not substitute for that gate.
+
+
+The deflated dataset correction installs dicom-parser's documented browser pako
+inflater only if absent, using the existing declared pako dependency. Cornerstone
+wadouri does not forward an explicit parser callback. Newly installed inflation
+is bounded to 256 MiB per dataset; malformed/truncated data fails closed. The
+browser regression generates both native and deflated DICOM, checks rendering and
+single-step keyboard navigation, and fails for the deflated case when the installer
+is removed. Clinic ingestion uses the same helper through an explicit callback,
+so it does not depend on opening a viewer first. This does not certify other
+compressed syntaxes or change source pixels/presentation.

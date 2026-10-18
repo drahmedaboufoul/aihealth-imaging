@@ -683,11 +683,14 @@ export function ModelViewer({
         </div>
         <div className="flex items-center gap-3">
           <span className="text-sm text-gray-600">{patient.name}</span>
-          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs text-white ${
-            patient.gender === 'male' ? 'bg-blue-500' : 'bg-pink-500'
-          }`}>
-            {patient.gender === 'male' ? 'M' : 'F'}
-          </div>
+          {/* Sex badge only when it is actually known — never a default. */}
+          {(patient.gender === 'male' || patient.gender === 'female') && (
+            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs text-white ${
+              patient.gender === 'male' ? 'bg-blue-500' : 'bg-pink-500'
+            }`}>
+              {patient.gender === 'male' ? 'M' : 'F'}
+            </div>
+          )}
         </div>
       </div>
 

@@ -20,14 +20,16 @@ import { initCornerstone } from '../lib/cornerstoneInit';
 import { shareDicomFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
 import { renderFromNifti, renderFromDicomStack } from '../components/cbct/cbctEngine';
 import { VOLUME_PRESETS_HU } from '../components/cbct/cbctViewModes';
+import { safeErrorMessage } from '../lib/safeError';
 
 // How long to wait between automatic re-checks while the server-side
 // NIfTI conversion is still running.
 const CONVERTING_POLL_MS = 20000;
 
-/** Classify an init failure into a typed error the UI can recover from. */
+/** Classify an init failure into a typed error the UI can recover from.
+ *  The message is sanitized: no ids, paths, URLs or raw backend text. */
 function toCbctError(err) {
-  const message = err?.message || String(err);
+  const message = safeErrorMessage(err, 'The volume could not be loaded. Please try again.');
   if (err?.kind) return { kind: err.kind, message };
   if (message === SHARE_EXPIRED_MESSAGE) return { kind: 'share-expired', message };
   if (/^Missing \?study=/.test(message)) return { kind: 'missing-study', message };
@@ -78,11 +80,11 @@ export function useCbctVolume({
     let cancelled = false;
 
     // ── Patient identity banner (W2) — best-effort, never blocks load ──
-    // Share mode: the resolve API already returned the patient name.
+    // Share mode: study date/type only — no patient identity on outward pages.
     // Authed mode: one joined select; RLS scopes it to the caller's clinic.
     if (sharePayload?.study) {
       setStudyMeta({
-        patientName: sharePayload.study.patient_name || null,
+        patientName: null,
         mrn: null,
         dob: null,
         studyDate: sharePayload.study.study_date || null,
@@ -155,7 +157,7 @@ export function useCbctVolume({
         // The study row itself is gone — typed not-found, no point
         // falling through to the DICOM path to fail again.
         if (niftiInfo.error === 'study not found') {
-          throw { kind: 'not-found', message: `No imaging study found for id ${effectiveStudyId}.` };
+          throw { kind: 'not-found', message: 'No imaging study was found for this link.' };
         }
 
         if (niftiInfo.url) {

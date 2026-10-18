@@ -2,8 +2,8 @@
 export interface Patient {
   id: string;
   name: string;
-  gender: 'male' | 'female';
-  age: number;
+  gender?: 'male' | 'female';
+  age?: number;
   avatar?: string;
 }
 

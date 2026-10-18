@@ -10,16 +10,17 @@
  *   - Token exists
  *   - Not expired
  *   - Not revoked
+ *   - Minted within the M0 caps (<= 7 days validity, <= 20 views)
  *   - view_count < max_views (then increments view_count)
  *
- * Returns:
+ * Returns (no patient name, recipient email or study/file row ids):
  *   {
- *     study: { id, study_type, study_date, description, patient_name? },
- *     files: [{ url, fileName, fileKind, sopInstanceUid? }],
+ *     study: { study_type, study_date },
+ *     files: [{ fileId: 'file-N' (opaque), url, fileName, fileKind, sopInstanceUid? }],
  *     niftiUrl?: string,
- *     viewer_annotations?: object,
+ *     viewer_annotations?: object,   // mesh alignment re-keyed to opaque fileIds
  *     permission: 'view' | 'export',
- *     expires_at, max_views, view_count,
+ *     expires_at, max_views, view_count, source,
  *   }
  *
  * Body: { token: string }
@@ -33,14 +34,19 @@ import { createClient } from '@supabase/supabase-js';
 import {
   CLINICAL_MEDIA_SIGNED_URL_EXPIRY_SECONDS,
   imagingInviteMatchesStudy,
+  inviteWithinShareCaps,
   isLiveImagingStudy,
+  opaqueFileRefs,
   patientReleaseAllowsInvite,
+  shareViewerAnnotations,
   sourceArtifactsMatchFiles,
 } from './_clinicalMediaShare.js';
+import { applyCors } from './_cors.js';
 
 export const config = { runtime: 'nodejs', maxDuration: 15 };
 
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+// Server-side env only (no VITE_ fallbacks); 503 when either is missing.
+const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const NIFTI_BUCKET   = 'imaging-derived';
@@ -57,14 +63,9 @@ const canonicalFileFingerprint = (files) => JSON.stringify((files || []).map((fi
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'private, no-store');
-  // CORS for the imaging viewer (different origin)
-  if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    return res.status(204).end();
-  }
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // The viewer calls this same-origin; other origins need the allowlist.
+  const corsOk = applyCors(req, res);
+  if (req.method === 'OPTIONS') return res.status(corsOk ? 204 : 403).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!SUPABASE_URL || !SERVICE_KEY) return res.status(503).json({ error: 'Service not configured' });
 
@@ -80,22 +81,23 @@ export default async function handler(req, res) {
   // Look up the invite
   const { data: invite, error: invErr } = await admin
     .from('imaging_share_invites')
-    .select('id, study_id, clinic_id, expires_at, revoked_at, view_count, max_views, permission, invited_email, source')
+    .select('id, study_id, clinic_id, created_at, expires_at, revoked_at, view_count, max_views, permission, source')
     .eq('token', token)
     .maybeSingle();
   if (invErr || !invite) return res.status(404).json({ error: 'Invite not found' });
   if (invite.revoked_at)              return res.status(403).json({ error: 'Invite was revoked' });
   if (!(new Date(invite.expires_at).getTime() > Date.now())) return res.status(403).json({ error: 'Invite expired' });
   if (invite.view_count >= invite.max_views) return res.status(403).json({ error: 'View limit reached' });
+  if (!inviteWithinShareCaps(invite)) return res.status(403).json({ error: 'Invite exceeds the allowed validity or view limit' });
 
-  // Look up the study + patient name (limited fields — no PHI beyond
-  // what's necessary to identify and render).
+  // Look up the study (limited fields — no patient identity is read or
+  // returned; the outside viewer only needs what renders the images).
   const { data: study, error: stErr } = await admin
     .from('imaging_studies')
     .select(`
-      id, clinic_id, study_type, study_date, description, status, archived_at, is_visible_to_patient, encounter_id, filing_scope,
+      id, clinic_id, study_type, study_date, status, archived_at, is_visible_to_patient, encounter_id, filing_scope,
       nifti_status, nifti_storage_path, viewer_annotations,
-      patient_id, customers(name)
+      patient_id
     `)
     .eq('id', invite.study_id)
     .maybeSingle();
@@ -248,8 +250,9 @@ export default async function handler(req, res) {
   if (signedByPath.size !== filesToSign.length) {
     return res.status(502).json({ error: 'The complete diagnostic series could not be authorized' });
   }
+  const fileRefs = opaqueFileRefs(filesToSign);
   const signedFiles = filesToSign.map(f => ({
-    fileId: f.id,
+    fileId: fileRefs.get(f.id),
     seriesInstanceUid: f.series_instance_uid,
     seriesNumber: f.series_number,
     seriesDescription: f.series_description,
@@ -328,21 +331,17 @@ export default async function handler(req, res) {
 
   return res.status(200).json({
     study: {
-      id:           study.id,
       study_type:   study.study_type,
       study_date:   study.study_date,
-      description:  study.description,
-      patient_name: study.customers?.name || null,
     },
     files: signedFiles.filter((f) => f.url),
     niftiUrl,
-    viewer_annotations: study.viewer_annotations || null,
+    viewer_annotations: shareViewerAnnotations(study.viewer_annotations, fileRefs),
     permission:  invite.permission,
     expires_at:  invite.expires_at,
     signed_urls_expires_at: signedUrlsExpireAt,
     max_views:   invite.max_views,
     view_count:  claimedInvite.view_count,
-    invited_email: invite.invited_email,
     source: invite.source,
   });
 }

@@ -126,7 +126,7 @@ export function parseMeshBuffer(buffer: ArrayBuffer, fileName: string, formatHin
       else if (format === 'ply') g = new PLYLoader().parse(buffer);
       else g = objGeometry(buffer);
     } catch (err) {
-      throw new Error(`Could not read the ${format.toUpperCase()} file (${err instanceof Error ? err.message : 'unknown error'}).`);
+      throw new Error(`Could not read the ${format.toUpperCase()} file (${err instanceof Error ? err.message : 'unknown error'}).`, { cause: err });
     }
     const pos = attr(g, 'position');
     if (!pos || pos.length < 9) throw new Error('The file contains no triangles.');

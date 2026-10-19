@@ -297,17 +297,17 @@ function PaneScene({ id, slots }: { id: PaneId; slots: Slot[] }) {
   }, [id]);
 
   // fit to the visible scans of this pane
-  const fit = useCallback((dir?: [number, number, number]) => {
+  const fit = useCallback((dir?: [number, number, number]): boolean => {
     const controls = controlsRef.current as PaneHandleControls | null;
     const group = rootRef.current;
-    if (!controls || !group) return;
+    if (!controls || !group) return false;
     group.updateMatrixWorld(true);
     const box = new THREE.Box3();
     group.traverse((o) => {
       const m = o as THREE.Mesh;
       if (m.isMesh && m.visible && m.userData?.slot && m.geometry.boundingBox) box.union(m.geometry.boundingBox.clone().applyMatrix4(m.matrixWorld));
     });
-    if (box.isEmpty()) return;
+    if (box.isEmpty()) return false;
     const center = box.getCenter(new THREE.Vector3());
     const radius = box.getBoundingSphere(new THREE.Sphere()).radius;
     const cam = camera as THREE.OrthographicCamera;
@@ -324,13 +324,14 @@ function PaneScene({ id, slots }: { id: PaneId; slots: Slot[] }) {
     cam.updateProjectionMatrix();
     controls.update();
     invalidate();
+    return true;
   }, [camera, size.width, size.height, invalidate]);
 
   const firstFit = useRef(true);
   useEffect(() => {
     const t = setTimeout(() => {
       // first framing: a three-quarter view (front and occlusal surfaces visible)
-      if (firstFit.current) { fit([0, 0.7, 1]); firstFit.current = false; } else fit();
+      if (firstFit.current) { if (fit([0, 0.7, 1])) firstFit.current = false; } else fit();
     }, 30);
     return () => clearTimeout(t);
   }, [frameRequest, scanKey, root, fit]);

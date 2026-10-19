@@ -19,7 +19,10 @@ const get = () => useWorkbench.getState();
 
 export interface IncomingFile {
   name: string;
-  read: () => Promise<ArrayBuffer>;
+  /** A local file: read inside the worker, never on the main thread. */
+  file?: File;
+  /** Otherwise: fetch the bytes (study files from the clinic's signed URLs). */
+  read?: () => Promise<ArrayBuffer>;
   textureUrl?: string;
   /** native -> case pose (column-major), e.g. a saved bite registration */
   matrix?: number[];
@@ -63,7 +66,7 @@ export function pairLocalFiles(files: File[]): IncomingFile[] {
       return b === base || (fussen && b === `fussentexture${fussen[1]}`);
     });
     const textureUrl = /\.obj$/i.test(f.name) && matches.length === 1 ? URL.createObjectURL(matches[0]) : undefined;
-    return { name: f.name, read: () => f.arrayBuffer(), textureUrl };
+    return { name: f.name, file: f, textureUrl };
   });
 }
 
@@ -95,14 +98,21 @@ async function loadOne(slot: Slot, file: IncomingFile): Promise<void> {
     },
   });
   try {
-    const t0 = performance.now();
-    const buffer = await file.read();
-    const fileReadMs = performance.now() - t0;
     const key = `${slot}.v0`;
-    const res = await getEngine().request(
-      { kind: 'load', key, name: file.name, buffer },
-      { transfer: [buffer], onProgress: (stage, fraction) => get().patchScan(slot, { stage, progress: fraction }) },
-    );
+    const onProgress = (stage: string, fraction: number) => get().patchScan(slot, { stage, progress: fraction });
+    let fileReadMs: number | undefined;
+    let res;
+    if (file.file) {
+      res = await getEngine().request({ kind: 'load', key, name: file.name, file: file.file }, { onProgress });
+      fileReadMs = res.stats.fileReadMs;
+    } else if (file.read) {
+      const t0 = performance.now();
+      const buffer = await file.read();
+      fileReadMs = performance.now() - t0;
+      res = await getEngine().request({ kind: 'load', key, name: file.name, buffer }, { transfer: [buffer], onProgress });
+    } else {
+      throw new Error('No scan data.');
+    }
     performance.mark(`iosw:${key}:received`);
     registerGfx(key, res.mesh);
     performance.mark(`iosw:${key}:registered`);

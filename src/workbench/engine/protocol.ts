@@ -48,7 +48,8 @@ export interface LoadStats {
 }
 
 export type WorkerRequest =
-  | { kind: 'load'; key: string; name: string; format?: string; buffer: ArrayBuffer }
+  /** `file` (a local File/Blob) is read inside the worker; `buffer` is used for fetched study files and tests. */
+  | { kind: 'load'; key: string; name: string; format?: string; buffer?: ArrayBuffer; file?: Blob }
   | { kind: 'icp'; fixedKey: string; movingKey: string; initial: number[]; options?: IcpOptions }
   | { kind: 'deviation'; refKey: string; testKey: string; testToRef: number[]; maxDistance: number; invertSign?: boolean; bands: number[] }
   | { kind: 'contact'; upper: { key: string; matrix: number[] }; lower: { key: string; matrix: number[] }; thresholds: ContactThresholds; searchRadius?: number; invertSign?: boolean }

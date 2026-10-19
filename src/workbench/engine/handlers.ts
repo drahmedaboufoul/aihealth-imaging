@@ -127,12 +127,16 @@ export async function handleRequest<K extends WorkerRequest['kind']>(
   const r = req as WorkerRequest;
   switch (r.kind) {
     case 'load': {
+      const tRead = now();
+      const buffer = r.buffer ?? (r.file ? await r.file.arrayBuffer() : null);
+      if (!buffer) throw new Error('No scan data was received.');
+      const fileReadMs = r.file ? now() - tRead : undefined;
       const t0 = now();
       progress('hashing source', 0.02);
-      const sourceSha256 = await sha256Hex(new Uint8Array(r.buffer));
+      const sourceSha256 = await sha256Hex(new Uint8Array(buffer));
       const t1 = now();
       progress('parsing', 0.1);
-      const parsed = parseMeshBuffer(r.buffer, r.name, r.format);
+      const parsed = parseMeshBuffer(buffer, r.name, r.format);
       progress('normals', 0.5);
       const t2 = now();
       const normals = computeVertexNormals(parsed.topo.positions, parsed.topo.indices);
@@ -164,6 +168,7 @@ export async function handleRequest<K extends WorkerRequest['kind']>(
           boundaryEdges: topo.boundaryEdges,
           closed: topo.closed,
           sourceHashMs: t1 - t0,
+          fileReadMs,
           parseMs: parsed.stats.parseMs,
           weldMs: parsed.stats.weldMs,
           normalsMs: t3 - t2,

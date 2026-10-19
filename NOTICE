@@ -1,0 +1,17 @@
+aiHealth Imaging
+================
+
+This product includes third-party software:
+
+- three.js (MIT License) — https://github.com/mrdoob/three.js
+- three-mesh-bvh (MIT License, Copyright (c) 2019 Garrett Johnson) — https://github.com/gkjohnson/three-mesh-bvh
+  Used by the IOS workbench for raycasting and closest-point queries.
+
+Algorithms in src/workbench/core are written for this project from the published methods:
+- Horn (1987), closed-form absolute orientation with unit quaternions (landmark alignment)
+- Chen & Medioni (1992), point-to-plane ICP
+- Garland & Heckbert (1997), quadric error metric simplification
+- Taubin (1995), lambda|mu smoothing
+
+No code from OccluTrace/OccluView (Apache-2.0) or from any GPL/AGPL project is included.
+manifold-3d (Apache-2.0) is not used in this version.

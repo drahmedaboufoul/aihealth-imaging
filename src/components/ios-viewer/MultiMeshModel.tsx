@@ -84,14 +84,14 @@ export async function loadOneFile(file: MeshFile): Promise<LoadedMesh> {
   let hasVertexColors = false;
 
   if (ext === 'stl') {
-    const { STLLoader } = await import('three/examples/jsm/loaders/STLLoader');
+    const { STLLoader } = await import('three/examples/jsm/loaders/STLLoader.js');
     geometry = new STLLoader().parse(buffer);
   } else if (ext === 'ply') {
-    const { PLYLoader } = await import('three/examples/jsm/loaders/PLYLoader');
+    const { PLYLoader } = await import('three/examples/jsm/loaders/PLYLoader.js');
     geometry = new PLYLoader().parse(buffer);
     if (geometry.hasAttribute('color')) hasVertexColors = true;
   } else if (ext === 'obj') {
-    const { OBJLoader } = await import('three/examples/jsm/loaders/OBJLoader');
+    const { OBJLoader } = await import('three/examples/jsm/loaders/OBJLoader.js');
     const text = new TextDecoder().decode(buffer);
     const obj = new OBJLoader().parse(normalizeObjVertexColors(text));
     obj.updateMatrixWorld(true);

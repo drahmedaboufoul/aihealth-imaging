@@ -7,6 +7,8 @@ import LoginPage from './pages/LoginPage';
 
 // IOS viewer is heavy (Three.js + react-three-fiber) — lazy-load it
 const IOSViewerPage = lazy(() => import('./pages/IOSViewerPage'));
+// IOS workbench (alignment, deviation, contacts, measurements, edits) — lazy
+const IOSWorkbenchPage = lazy(() => import('./pages/IOSWorkbenchPage'));
 // DICOM viewer (Cornerstone3D + WASM codecs) — heavy, lazy
 const DicomViewerPage = lazy(() => import('./pages/DicomViewerPage'));
 // CBCT viewer (volume rendering + MPR) — heaviest, lazy
@@ -35,6 +37,16 @@ export default function App() {
         element={
           <Suspense fallback={<ViewerLoader />}>
             <IOSViewerPage />
+          </Suspense>
+        }
+      />
+
+      {/* IOS workbench v1 — local files or ?study=<id>[&compare=<id>] */}
+      <Route
+        path="/viewer/ios/workbench"
+        element={
+          <Suspense fallback={<ViewerLoader />}>
+            <IOSWorkbenchPage />
           </Suspense>
         }
       />

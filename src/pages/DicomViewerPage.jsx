@@ -37,6 +37,10 @@ import { severityColor, typeLabel, anchorFindingToWorld, projectAnchoredBox } fr
 import { serialize2DState, apply2DState } from '../lib/viewerRoom';
 import { useViewerRoom } from '../hooks/useViewerRoom';
 import { supabase, SUPABASE_URL, SUPABASE_ANON_KEY } from '../lib/supabase';
+import { ENABLE_VIEWER_ROOMS, canShowThirdPartyAi } from '../lib/featureFlags';
+import { safeErrorMessage } from '../lib/safeError';
+
+const LOAD_ERROR_MESSAGE = 'The image could not be loaded. Reopen the link or try again.';
 
 const RENDERING_ENGINE_ID = 'aihRenderingEngine';
 const VIEWPORT_ID         = 'STACK_VIEWPORT';
@@ -91,6 +95,8 @@ export default function DicomViewerPage() {
   // Read-only sessions (shared links / patient embeds) hide write actions
   // like AI diagnosis, which needs an authed JWT and writes an audit row.
   const readOnly = searchParams.get('readonly') === '1' || !!shareKey;
+  // Outside-AI reading: build flag (default off) + authed, writable session.
+  const showAiRead = canShowThirdPartyAi({ readOnly });
 
   const [stage, setStage] = useState('init'); // init | fetching | rendering | ready | error
   const [error, setError] = useState(null);
@@ -121,12 +127,15 @@ export default function DicomViewerPage() {
   const [showShareDialog, setShowShareDialog] = useState(false);
 
   // Live co-viewing. Operator = authed clinician who flips "Go live"; follower
-  // = a shared/read-only session (auto-joins and mirrors when an operator is
-  // live). Room is keyed by the study id, which both sides already hold.
-  const roomStudyId = studyId || sharePayload?.study?.id || null;
+  // = a read-only session (auto-joins and mirrors when an operator is live).
+  // OFF by default (ENABLE_VIEWER_ROOMS): the channel is public and keyed by
+  // the study id. M1 needs a private Realtime channel + RLS policy and a
+  // server-issued room id before rooms return; share payloads no longer carry
+  // the study id, so shared sessions cannot join a room.
+  const roomStudyId = ENABLE_VIEWER_ROOMS ? (studyId || null) : null;
   const [goLive, setGoLive] = useState(false);
   const applyingRemoteRef = useRef(false); // guard so applied frames don't echo
-  const roomRole = sharePayload?.source === 'patient' ? null : readOnly ? 'follower' : (goLive ? 'operator' : null);
+  const roomRole = !ENABLE_VIEWER_ROOMS || sharePayload?.source === 'patient' ? null : readOnly ? 'follower' : (goLive ? 'operator' : null);
 
   const onRemoteState = useCallback((s) => {
     applyingRemoteRef.current = true;
@@ -211,7 +220,8 @@ export default function DicomViewerPage() {
         setInstanceIdx(0);
       } catch (err) {
         if (cancelled) return;
-        setError(err?.message || String(err));
+        console.error('[dicom] load failed:', err);
+        setError(safeErrorMessage(err, LOAD_ERROR_MESSAGE));
         setStage('error');
       }
     })();
@@ -349,7 +359,7 @@ export default function DicomViewerPage() {
       } catch (err) {
         if (cancelled) return;
         console.error('Cornerstone init/render failed:', err);
-        setError(err?.message || String(err));
+        setError(safeErrorMessage(err, LOAD_ERROR_MESSAGE));
         setStage('error');
       }
     })();
@@ -484,7 +494,7 @@ export default function DicomViewerPage() {
   // coordinates so it tracks the anatomy through later navigation.
   const runAiDiagnosis = useCallback(async () => {
     const vp = viewportRef.current;
-    if (!vp || readOnly) return;
+    if (!vp || !showAiRead) return;
     setAiStage('running');
     setAiError(null);
     try {
@@ -517,7 +527,7 @@ export default function DicomViewerPage() {
       if (!resp.ok) {
         const msg = resp.status === 503
           ? 'AI service not configured on this deployment.'
-          : (body?.error || `AI request failed (${resp.status}).`);
+          : safeErrorMessage(body?.error, `AI request failed (${resp.status}).`);
         setAiError(msg);
         setAiStage('error');
         return;
@@ -536,10 +546,11 @@ export default function DicomViewerPage() {
       setAiStage('done');
       setShowAiBoxes(true);
     } catch (e) {
-      setAiError(e?.message || String(e));
+      console.error('[dicom] AI read failed:', e);
+      setAiError(safeErrorMessage(e, 'AI request failed.'));
       setAiStage('error');
     }
-  }, [readOnly, studyId, imageMeta]);
+  }, [showAiRead, studyId, imageMeta]);
 
   // Re-project AI boxes whenever the camera moves (zoom/pan/rotate/flip) so
   // they stay pinned to anatomy. We just bump a tick; the overlay reads the
@@ -640,7 +651,7 @@ export default function DicomViewerPage() {
         </label>}
         <div className="flex items-center gap-2">
           {/* Follower: show when an operator is presenting live. */}
-          {stage === 'ready' && readOnly && roomStudyId && operatorPresent && (
+          {ENABLE_VIEWER_ROOMS && stage === 'ready' && readOnly && roomStudyId && operatorPresent && (
             <span className="text-xs px-2 py-1 rounded bg-status-danger-soft text-status-danger border border-status-danger/40 flex items-center gap-1.5">
               <Radio size={12} className="animate-pulse" /> Following{operatorName ? ` ${operatorName}` : ''} · live
             </span>
@@ -648,7 +659,7 @@ export default function DicomViewerPage() {
           {/* Operator: Go-live toggle + participant count. */}
           {stage === 'ready' && studyId && !readOnly && (
             <>
-              <button
+              {ENABLE_VIEWER_ROOMS && <button
                 onClick={() => setGoLive((v) => !v)}
                 className={`text-xs px-2 py-1 rounded flex items-center gap-1.5 ${
                   goLive ? 'bg-status-danger text-white' : 'bg-fills-f1 hover:bg-fills-f2 text-labels-primary'
@@ -660,7 +671,7 @@ export default function DicomViewerPage() {
                 {goLive && participants > 1 && (
                   <span className="inline-flex items-center gap-0.5 ml-0.5"><Users size={11} /> {participants}</span>
                 )}
-              </button>
+              </button>}
               <button
                 onClick={() => setShowShareDialog(true)}
                 className="text-xs px-2 py-1 rounded bg-fills-f1 text-labels-primary hover:bg-accent hover:text-white flex items-center gap-1.5"
@@ -676,7 +687,6 @@ export default function DicomViewerPage() {
       {showShareDialog && studyId && (
         <ShareInviteDialog
           studyId={studyId}
-          patientName={imageMeta?.patientName}
           onClose={() => setShowShareDialog(false)}
         />
       )}
@@ -757,8 +767,10 @@ export default function DicomViewerPage() {
         {stage === 'ready' && imageMeta && (
           <>
             <div className="absolute top-3 left-3 text-xs leading-tight font-mono pointer-events-none" style={{ color: VIEWER_TOKENS.labelPrimary, textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
-              {imageMeta.patientName && <div className="text-labels-primary">{imageMeta.patientName}</div>}
-              {imageMeta.patientId && <div>ID: {imageMeta.patientId}</div>}
+              {/* Patient identity from the DICOM header: staff sessions only —
+                  never on shared / read-only pages. */}
+              {!readOnly && imageMeta.patientName && <div className="text-labels-primary">{imageMeta.patientName}</div>}
+              {!readOnly && imageMeta.patientId && <div>ID: {imageMeta.patientId}</div>}
               {imageMeta.studyDate && <div>{imageMeta.studyDate}</div>}
               {imageMeta.studyDescription && <div className="text-labels-tertiary">{imageMeta.studyDescription}</div>}
             </div>
@@ -905,9 +917,11 @@ export default function DicomViewerPage() {
             </button>
           </div>
 
-          {/* AI diagnosis — hidden in read-only / shared sessions (needs an
-              authed JWT + writes an audit row). */}
-          {!readOnly && (
+          {/* AI diagnosis — sends the frame to an outside AI provider, so it is
+              behind VITE_ENABLE_THIRD_PARTY_AI (default off) and hidden in
+              read-only / shared sessions (needs an authed JWT + writes an
+              audit row). */}
+          {showAiRead && (
             <div className="mt-3 pt-3 border-t border-separator-s1">
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-xs uppercase tracking-wider text-labels-tertiary flex items-center gap-1">

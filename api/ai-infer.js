@@ -12,38 +12,36 @@
  * (RLS enforces clinic scoping), then forwards to the AI inference
  * service using a server-side internal key.
  *
- * Required Vercel env vars on aihealth-imaging:
+ * Required Vercel env vars on aihealth-imaging (503 when any is missing;
+ * no VITE_ fallbacks server-side):
  *   - AI_INFERENCE_URL
  *   - INFERENCE_INTERNAL_KEY
- *   - SUPABASE_URL (or VITE_SUPABASE_URL)
+ *   - SUPABASE_URL
+ *   - SUPABASE_ANON_KEY
+ * Optional: ALLOWED_ORIGINS (CORS allowlist, see _cors.js)
  *
  * Supported models: nerve-canal, teeth-segment, landmarks-ceph, arch-curve
  */
 
 import { createClient } from '@supabase/supabase-js';
+import { applyCors } from './_cors.js';
 
 export const config = { runtime: 'nodejs', maxDuration: 120 };
 
-const SUPABASE_URL  = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const SUPABASE_URL  = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const INFERENCE_URL = process.env.AI_INFERENCE_URL;
 const INFERENCE_KEY = process.env.INFERENCE_INTERNAL_KEY;
 
 const VALID_MODELS = new Set(['nerve-canal', 'teeth-segment', 'landmarks-ceph', 'arch-curve']);
 
 export default async function handler(req, res) {
-  if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    return res.status(204).end();
-  }
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const corsOk = applyCors(req, res, { headers: 'Content-Type, Authorization' });
+  if (req.method === 'OPTIONS') return res.status(corsOk ? 204 : 403).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  if (!INFERENCE_URL || !INFERENCE_KEY) {
-    return res.status(503).json({
-      error: 'AI inference service not configured. Set AI_INFERENCE_URL and INFERENCE_INTERNAL_KEY on Vercel.',
-    });
+  if (!INFERENCE_URL || !INFERENCE_KEY || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return res.status(503).json({ error: 'AI inference service not configured' });
   }
 
   const { study_id, model } = req.body || {};
@@ -54,7 +52,9 @@ export default async function handler(req, res) {
   const jwt = auth.startsWith('Bearer ') ? auth.slice(7) : null;
   if (!jwt) return res.status(401).json({ error: 'Missing Authorization bearer token' });
 
-  const userClient = createClient(SUPABASE_URL, jwt, {
+  // Project anon key as the apikey; the caller's JWT as the bearer so RLS
+  // evaluates as that user.
+  const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: { headers: { Authorization: `Bearer ${jwt}` } },
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -66,7 +66,7 @@ export default async function handler(req, res) {
   if (error || !study) return res.status(403).json({ error: 'Study not accessible' });
 
   if (study.nifti_status !== 'ready') {
-    console.warn(`[ai-infer] study ${study_id} nifti_status=${study.nifti_status}; running anyway (placeholder ok)`);
+    console.warn(`[ai-infer] nifti_status=${study.nifti_status}; running anyway (placeholder ok)`);
   }
 
   const url = `${INFERENCE_URL.replace(/\/$/, '')}/infer/${model}`;
@@ -86,6 +86,6 @@ export default async function handler(req, res) {
     return res.status(200).json(body);
   } catch (e) {
     console.error('[ai-infer] forward failed:', e);
-    return res.status(502).json({ error: 'Inference service unreachable: ' + (e?.message || e) });
+    return res.status(502).json({ error: 'Inference service unreachable' });
   }
 }

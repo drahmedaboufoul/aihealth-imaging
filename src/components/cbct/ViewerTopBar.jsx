@@ -23,7 +23,7 @@ export default function ViewerTopBar({
   onSwitchMode,
   stage,
   studyId,
-  effectiveStudyId,
+  showRooms = false,
   goLive,
   onToggleGoLive,
   participants,
@@ -55,11 +55,11 @@ export default function ViewerTopBar({
             </div>
           </>
         )}
-        {/* Patient identity banner — wrong-patient guard. Data comes from
-            imaging_studies → customers (authed) or the share payload.
-            Rendered even in embedded mode: patient context is the point
-            of the share. */}
-        {patientMeta && (patientMeta.patientName || patientMeta.studyDate) && (
+        {/* Patient identity banner — wrong-patient guard for staff. Data
+            comes from imaging_studies → customers (authed). Read-only and
+            shared sessions show the study date only: no name, MRN or DOB
+            on outward pages. */}
+        {patientMeta && !readOnly && (patientMeta.patientName || patientMeta.studyDate) && (
           <div
             className="flex items-center gap-1.5 text-xs text-labels-secondary min-w-0 px-2 py-1 rounded-lg bg-fills-f1"
             title="Patient for this study"
@@ -71,6 +71,11 @@ export default function ViewerTopBar({
             {patientMeta.mrn && <span className="shrink-0">· MRN {patientMeta.mrn}</span>}
             {patientMeta.dob && <span className="shrink-0">· DOB {patientMeta.dob}</span>}
             {patientMeta.studyDate && <span className="shrink-0">· {patientMeta.studyDate}</span>}
+          </div>
+        )}
+        {patientMeta && readOnly && patientMeta.studyDate && (
+          <div className="text-xs text-labels-secondary px-2 py-1 rounded-lg bg-fills-f1 shrink-0">
+            Shared study · {patientMeta.studyDate}
           </div>
         )}
       </div>
@@ -91,7 +96,7 @@ export default function ViewerTopBar({
 
       <div className="flex items-center gap-2">
         {/* Follower: show when an operator is presenting live. */}
-        {stage === 'ready' && readOnly && effectiveStudyId && operatorPresent && (
+        {showRooms && stage === 'ready' && readOnly && operatorPresent && (
           <span className="text-xs px-2 py-1 rounded-lg bg-status-danger-soft text-status-danger flex items-center gap-1.5">
             <Radio size={12} className="animate-pulse" /> Following{operatorName ? ` ${operatorName}` : ''} · live
           </span>
@@ -99,7 +104,7 @@ export default function ViewerTopBar({
         {/* Operator: Go-live toggle + participant count. */}
         {stage === 'ready' && studyId && !readOnly && (
           <>
-            <button
+            {showRooms && <button
               onClick={onToggleGoLive}
               className={`text-sm px-2 py-1 rounded-lg flex items-center gap-1.5 transition-[background-color,color] duration-150 ${
                 goLive ? 'bg-status-danger text-white' : 'bg-fills-f1 hover:bg-fills-f2 text-labels-primary'
@@ -113,7 +118,7 @@ export default function ViewerTopBar({
               {goLive && participants > 1 && (
                 <span className="inline-flex items-center gap-0.5 ml-0.5"><Users size={12} /> {participants}</span>
               )}
-            </button>
+            </button>}
             <button
               onClick={onShare}
               className="text-sm px-2 py-1 rounded-lg bg-fills-f1 hover:bg-fills-f2 text-labels-primary flex items-center gap-1.5 transition-[background-color] duration-150"

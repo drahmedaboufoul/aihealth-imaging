@@ -32,6 +32,7 @@ import { resolveSignedUrl, resolveStudyFiles } from '../lib/signedUrl';
 import { readSharePayload, shareMeshFiles, SHARE_EXPIRED_MESSAGE } from '../lib/sharePayload';
 import { ModelViewer } from '../components/ios-viewer/ModelViewer';
 import { supabase } from '../lib/supabase';
+import { safeErrorMessage } from '../lib/safeError';
 
 export default function IOSViewerPage() {
   const [searchParams] = useSearchParams();
@@ -98,12 +99,12 @@ export default function IOSViewerPage() {
   // Memoize patient + scan so their object references stay stable across
   // renders. Without this, ModelViewer's `useEffect(..., [scan])` re-runs
   // on every keystroke / tool click and re-shows the loading overlay.
+  // Gender/age are unknown here, so they are omitted (ModelViewer hides the
+  // badge). Read-only / shared sessions never show a patient name.
   const patient = useMemo(() => ({
     id: fileId || 'P001',
-    name: isLecture ? 'Teaching model' : queryName || (isDemo ? 'Demo Patient' : 'Patient'),
-    gender: 'male',
-    age: 30,
-  }), [fileId, queryName, isDemo, isLecture]);
+    name: isLecture ? 'Teaching model' : readOnly ? 'Shared scan' : queryName || (isDemo ? 'Demo Patient' : 'Patient'),
+  }), [fileId, queryName, isDemo, isLecture, readOnly]);
 
   const scan = useMemo(() => ({
     id: fileId || 'S001',
@@ -148,7 +149,7 @@ export default function IOSViewerPage() {
           setFileUrl(null);
           setFileName(`Case · ${meshes.length} scan${meshes.length !== 1 ? 's' : ''}`);
           setHud({
-            patientName: sharePayload.study?.patient_name || null,
+            patientName: null, // no patient identity on shared pages
             studyDate:   sharePayload.study?.study_date || null,
             studyType:   sharePayload.study?.study_type || null,
           });
@@ -214,7 +215,7 @@ export default function IOSViewerPage() {
         }
       } catch (err) {
         if (cancelled) return;
-        setError(err.message || String(err));
+        setError(safeErrorMessage(err, 'The 3D scan could not be loaded. Reopen the link or try again.'));
         console.error('Error loading file:', err);
       } finally {
         if (!cancelled) setLoading(false);
@@ -243,13 +244,13 @@ export default function IOSViewerPage() {
             <p className="text-[14px] font-medium text-text">Could not load 3D scan</p>
             <p className="text-[11px] text-muted font-mono break-all mt-1">{error}</p>
           </div>
-          <div className="text-[11.5px] text-muted leading-relaxed mt-2">
+          {!readOnly && <div className="text-[11.5px] text-muted leading-relaxed mt-2">
             This page expects one of:{' '}
             <code className="text-accent font-mono">?study=&lt;study_id&gt;</code>{' '}
             (loads upper + lower + occlusion together),{' '}
             <code className="text-accent font-mono">?id=&lt;file_id&gt;</code>, or{' '}
             <code className="text-accent font-mono">?path=&lt;bucket/key&gt;</code>.
-          </div>
+          </div>}
           <div className="flex items-center gap-2 mt-2">
             <Link
               to="/viewer/ios?demo=1"
@@ -310,9 +311,13 @@ export default function IOSViewerPage() {
       setComparisonStudyInfo({ id: chosenStudyId, label });
       setShowCompareDialog(false);
     } catch (e) {
-      toast.error('Could not load study: ' + (e?.message || e));
+      console.error('[compare] load failed:', e);
+      toast.error('Could not load study: ' + safeErrorMessage(e, 'please try again.'));
     }
   };
+
+  // HUD heading: patient name for staff; neutral label on shared pages.
+  const hudTitle = readOnly ? (hud ? 'Shared scan' : null) : (hud?.patientName || queryName);
 
   const clearComparison = () => {
     setComparisonFiles(null);
@@ -379,14 +384,14 @@ export default function IOSViewerPage() {
       )}
       {/* Patient HUD — top-right corner. Shows whose scan this is +
           modality + date so clinicians always know what they're viewing. */}
-      {(hud?.patientName || queryName) && !isDemo && (
+      {hudTitle && !isDemo && (
         <div className="absolute top-3 right-3 z-40 pointer-events-none">
           <div
             className="text-[11px] font-mono rounded shadow-lg px-3 py-1.5 backdrop-blur-sm"
             style={{ backgroundColor: 'rgba(11,13,16,0.78)', color: '#cdd2d8', border: '1px solid #1d2128' }}
           >
             <div className="font-semibold tracking-wide text-amber-300">
-              {hud?.patientName || queryName}
+              {hudTitle}
             </div>
             <div className="text-[9px] uppercase tracking-wider text-gray-400 mt-0.5 flex items-center gap-1.5">
               {hud?.studyType && <span>{hud.studyType.replace(/_/g, ' ')}</span>}
@@ -421,7 +426,6 @@ export default function IOSViewerPage() {
       {showShareDialog && studyId && (
         <ShareInviteDialog
           studyId={studyId}
-          patientName={hud?.patientName}
           onClose={() => setShowShareDialog(false)}
         />
       )}

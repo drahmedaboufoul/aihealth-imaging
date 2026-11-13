@@ -31,8 +31,9 @@ export async function resolveSignedUrl({ id, path }) {
       .select('id, file_name, file_path, bucket_id, file_type')
       .eq('id', id)
       .single();
-    if (error) throw new Error(`patient_files lookup failed: ${error.message}`);
-    if (!data) throw new Error(`patient_files row not found for id=${id}`);
+    // User-facing messages carry no ids, paths or backend error text.
+    if (error) throw new Error('The file could not be looked up.');
+    if (!data) throw new Error('The file was not found or is not accessible.');
     bucket = data.bucket_id || DEFAULT_BUCKET;
     key = data.file_path;
     fileName = data.file_name;
@@ -42,7 +43,7 @@ export async function resolveSignedUrl({ id, path }) {
     .storage
     .from(bucket)
     .createSignedUrl(key, 60 * 60); // 1 hour
-  if (signErr) throw new Error(`createSignedUrl failed: ${signErr.message}`);
+  if (signErr) throw new Error('The file could not be opened.');
 
   return { url: signed.signedUrl, fileName, bucket, key };
 }
@@ -66,9 +67,9 @@ export async function resolveStudyFiles(studyId) {
     .eq('study_id', studyId)
     .order('created_at', { ascending: true });
 
-  if (error) throw new Error(`imaging_files lookup failed: ${error.message}`);
+  if (error) throw new Error('The study files could not be looked up.');
   if (!rows || rows.length === 0) {
-    throw new Error(`No 3D scan files (STL/PLY/OBJ) found for study ${studyId}`);
+    throw new Error('No 3D scan files (STL/PLY/OBJ) found for this study.');
   }
 
   // Sign every storage_path in parallel. Partial failure is allowed —
@@ -76,14 +77,14 @@ export async function resolveStudyFiles(studyId) {
   const scanRows = rows.filter((row) => SCAN_KINDS.includes(row.file_kind) || /\.(jpe?g|png)$/i.test(row.original_filename || ''));
   const { data: study, error: studyError } = await supabase.from('imaging_studies')
     .select('viewer_annotations').eq('id', studyId).single();
-  if (studyError) throw new Error(`Scan alignment lookup failed: ${studyError.message}`);
+  if (studyError) throw new Error('Scan alignment lookup failed.');
   const signed = await Promise.all(scanRows.map(async (row) => {
     const { data, error: sErr } = await supabase
       .storage
       .from(IMAGING_BUCKET)
       .createSignedUrl(row.storage_path, 60 * 60);
     if (sErr) {
-      console.warn(`[resolveStudyFiles] sign failed for ${row.storage_path}: ${sErr.message}`);
+      console.warn('[resolveStudyFiles] sign failed for one file:', sErr.message);
       return null;
     }
     return {
@@ -96,7 +97,7 @@ export async function resolveStudyFiles(studyId) {
   }));
 
   const ok = signed.filter(Boolean);
-  if (ok.length === 0) throw new Error(`Could not sign any files for study ${studyId}`);
+  if (ok.length === 0) throw new Error('Could not sign any files for this study.');
   return shareMeshFiles({ files: ok, viewer_annotations: study?.viewer_annotations });
 }
 
@@ -123,9 +124,9 @@ export async function resolveStudyDicomFiles(studyId) {
     .eq('file_kind', 'dicom')
     .order('sop_instance_uid', { ascending: true, nullsFirst: false });
 
-  if (error) throw new Error(`imaging_files lookup failed: ${error.message}`);
+  if (error) throw new Error('The study files could not be looked up.');
   if (!rows || rows.length === 0) {
-    throw new Error(`No DICOM files found for study ${studyId}`);
+    throw new Error('No DICOM files found for this study.');
   }
 
   // Sign in parallel. CBCT series of 400 instances signs in ~1-2s thanks to
@@ -136,7 +137,7 @@ export async function resolveStudyDicomFiles(studyId) {
       .from(IMAGING_BUCKET)
       .createSignedUrl(row.storage_path, 60 * 60);
     if (sErr) {
-      console.warn(`[resolveStudyDicomFiles] sign failed for ${row.storage_path}: ${sErr.message}`);
+      console.warn('[resolveStudyDicomFiles] sign failed for one file:', sErr.message);
       return null;
     }
     return {
@@ -149,7 +150,7 @@ export async function resolveStudyDicomFiles(studyId) {
   }));
 
   const ok = signed.filter(Boolean);
-  if (ok.length === 0) throw new Error(`Could not sign any DICOM files for study ${studyId}`);
+  if (ok.length === 0) throw new Error('Could not sign any DICOM files for this study.');
   return ok;
 }
 
@@ -176,7 +177,7 @@ export async function resolveStudyNiftiVolume(studyId) {
     .eq('id', studyId)
     .maybeSingle();
 
-  if (error) throw new Error(`imaging_studies lookup failed: ${error.message}`);
+  if (error) throw new Error('The study could not be looked up.');
   if (!row) return { url: null, status: null, error: 'study not found' };
 
   // Status surface so the viewer can render different UI for queued vs

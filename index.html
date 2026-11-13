@@ -5,23 +5,20 @@
     <link rel="icon" type="image/png" href="/aihealth-mark.png" />
     <link rel="apple-touch-icon" href="/aihealth-mark.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="preconnect" href="https://rsms.me/" />
-    <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
-    <!-- JetBrains Mono — HUD / measurement readouts (typography audit #29) -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" />
+    <!-- No third-party font CDNs: patient-facing pages must not call out to
+         outside hosts. Inter / JetBrains Mono are used when installed
+         locally, otherwise the system UI / monospace stacks (index.css,
+         tailwind.config.js). -->
     <title>Kyour.ai Imaging Interpreter</title>
     <meta name="description" content="Kyour.ai Imaging Interpreter — view your scan invitation." />
 
-    <!-- Social share (aiHealth mark) -->
+    <!-- Social share (aiHealth mark). og:url / og:image / twitter:image are
+         injected at build time from VITE_PUBLIC_VIEWER_URL (vite.config.js)
+         and omitted when it is unset. -->
     <meta property="og:title" content="Kyour.ai Imaging Interpreter" />
     <meta property="og:description" content="View your scan invitation with Kyour.ai Imaging Interpreter." />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://aihealth-imaging.vercel.app/" />
-    <meta property="og:image" content="https://aihealth-imaging.vercel.app/aihealth-mark.png" />
     <meta name="twitter:card" content="summary" />
-    <meta name="twitter:image" content="https://aihealth-imaging.vercel.app/aihealth-mark.png" />
 
     <!--
       coi-serviceworker enables crossOriginIsolated (and therefore

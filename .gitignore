@@ -15,3 +15,5 @@ dist
 skills-lock.json
 handoff/fussen-report/
 .env*
+# Names-only template is committed on purpose.
+!.env.example

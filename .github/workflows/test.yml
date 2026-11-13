@@ -21,6 +21,12 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          # Inert placeholders: production builds refuse to run without the
+          # client config. No real project values in CI.
+          VITE_SUPABASE_URL: http://127.0.0.1:54321
+          VITE_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+          VITE_PUBLIC_VIEWER_URL: https://viewer.invalid
 
       - name: Test
         run: npm test

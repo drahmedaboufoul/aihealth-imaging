@@ -7,6 +7,7 @@ vi.mock('@supabase/supabase-js', () => ({ createClient: vi.fn() }));
 async function loadHandler({ env = {}, fake, fetchImpl } = {}) {
   vi.resetModules();
   vi.stubEnv('SUPABASE_URL', env.SUPABASE_URL ?? 'https://supabase.test');
+  vi.stubEnv('SUPABASE_ANON_KEY', env.SUPABASE_ANON_KEY ?? 'anon-key');
   vi.stubEnv('AI_INFERENCE_URL', env.AI_INFERENCE_URL ?? 'https://infer.test');
   vi.stubEnv('INFERENCE_INTERNAL_KEY', env.INFERENCE_INTERNAL_KEY ?? 'internal-key');
   const { createClient } = await import('@supabase/supabase-js');
@@ -35,12 +36,21 @@ afterEach(() => {
 });
 
 describe('ai-infer — request validation', () => {
-  it('answers OPTIONS preflight with 204 and CORS headers', async () => {
+  it('answers an allowlisted OPTIONS preflight with 204 and an origin echo (never *)', async () => {
     const { handler } = await loadHandler();
     const res = makeRes();
-    await handler(makeReq({ method: 'OPTIONS' }), res);
+    await handler(makeReq({ method: 'OPTIONS', headers: { origin: 'https://staff.aihealthmc.ae' } }), res);
     expect(res.statusCode).toBe(204);
+    expect(res.headers['Access-Control-Allow-Origin']).toBe('https://staff.aihealthmc.ae');
     expect(res.headers['Access-Control-Allow-Headers']).toContain('Authorization');
+  });
+
+  it('refuses a preflight from an origin outside the allowlist', async () => {
+    const { handler } = await loadHandler();
+    const res = makeRes();
+    await handler(makeReq({ method: 'OPTIONS', headers: { origin: 'https://evil.example' } }), res);
+    expect(res.statusCode).toBe(403);
+    expect(res.headers).not.toHaveProperty('Access-Control-Allow-Origin');
   });
 
   it('rejects non-POST methods with 405', async () => {
@@ -55,6 +65,18 @@ describe('ai-infer — request validation', () => {
     const res = makeRes();
     await handler(makeReq({ body: { study_id: 's', model: 'nerve-canal' } }), res);
     expect(res.statusCode).toBe(503);
+  });
+
+  it.each(['SUPABASE_URL', 'SUPABASE_ANON_KEY'])('returns 503 without %s (no VITE_ fallback)', async (name) => {
+    vi.stubEnv('VITE_SUPABASE_URL', 'https://vite-fallback.test');
+    vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'vite-fallback-key');
+    const fetchImpl = okUpstream();
+    const { handler, createClient } = await loadHandler({ env: { [name]: '' }, fake: accessibleStudy(), fetchImpl });
+    const res = makeRes();
+    await handler(makeReq({ body: { study_id: 's1', model: 'nerve-canal' }, headers: AUTHED }), res);
+    expect(res.statusCode).toBe(503);
+    expect(createClient).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('returns 400 for a missing study_id', async () => {
@@ -101,13 +123,13 @@ describe('ai-infer — request validation', () => {
 });
 
 describe('ai-infer — RLS gate', () => {
-  it('builds the user-scoped client from the caller JWT', async () => {
+  it('builds the user-scoped client with the anon key + caller JWT bearer', async () => {
     const fake = accessibleStudy();
     const { handler, createClient } = await loadHandler({ fake, fetchImpl: okUpstream() });
     await handler(makeReq({ body: { study_id: 's1', model: 'nerve-canal' }, headers: AUTHED }), makeRes());
     expect(createClient).toHaveBeenCalledWith(
       'https://supabase.test',
-      'user-jwt',
+      'anon-key',
       expect.objectContaining({
         global: { headers: { Authorization: 'Bearer user-jwt' } },
       }),
@@ -200,6 +222,7 @@ describe('ai-infer — upstream forwarding', () => {
     await handler(makeReq({ body: { study_id: 's1', model: 'nerve-canal' }, headers: AUTHED }), res);
     expect(res.statusCode).toBe(502);
     expect(res.body.error).toMatch(/unreachable/);
-    expect(res.body.error).toMatch(/ECONNREFUSED/);
+    // Raw network errors (hostnames, codes) stay in server logs.
+    expect(res.body.error).not.toMatch(/ECONNREFUSED/);
   });
 });

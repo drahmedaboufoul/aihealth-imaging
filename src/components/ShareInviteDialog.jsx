@@ -17,14 +17,16 @@ import {
 } from '@/components/ui/dialog';
 import {
   createShareInvite, PERMISSIONS, VALIDITY_UNITS, computeExpiry, isValidEmail,
+  SHARE_DEFAULT_VIEWS, SHARE_MAX_VIEWS,
 } from '../lib/shareInvite';
+import { safeErrorMessage } from '../lib/safeError';
 
-export default function ShareInviteDialog({ studyId, patientName, onClose }) {
+export default function ShareInviteDialog({ studyId, onClose }) {
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
   const [amount, setAmount] = useState(7);
   const [unit, setUnit] = useState('days');
-  const [maxViews, setMaxViews] = useState(50);
+  const [maxViews, setMaxViews] = useState(SHARE_DEFAULT_VIEWS);
   const [permission, setPermission] = useState('view');
   const [note, setNote] = useState('');
   const [stage, setStage] = useState('form'); // form | creating | done | error
@@ -45,14 +47,15 @@ export default function ShareInviteDialog({ studyId, patientName, onClose }) {
       setResult(r);
       setStage('done');
     } catch (e) {
-      setError(e?.message || String(e));
+      setError(safeErrorMessage(e, 'Could not create the share link. Please try again.'));
       setStage('error');
     }
   };
 
+  // The copied text goes to an outside recipient: no patient name or id.
   const copy = async (which) => {
     const text = which === 'all'
-      ? `${patientName ? patientName + ' — ' : ''}imaging share link\n${result.url}\nExpires ${new Date(result.expiresAt).toLocaleString('en-GB')}`
+      ? `Imaging share link\n${result.url}\nExpires ${new Date(result.expiresAt).toLocaleString('en-GB')}`
       : result.url;
     try {
       await navigator.clipboard.writeText(text);
@@ -129,7 +132,7 @@ export default function ShareInviteDialog({ studyId, patientName, onClose }) {
                 <span className={labelCls}>Valid for</span>
                 <div className="flex gap-1 mt-1">
                   <input
-                    type="number" min={1} value={amount}
+                    type="number" min={1} max={VALIDITY_UNITS.find((u) => u.value === unit)?.max} value={amount}
                     onChange={(e) => setAmount(e.target.value)}
                     className={`w-16 !mt-0 ${inputCls}`}
                   />
@@ -144,7 +147,7 @@ export default function ShareInviteDialog({ studyId, patientName, onClose }) {
               <label className="block">
                 <span className={labelCls}>Max views</span>
                 <input
-                  type="number" min={1} value={maxViews}
+                  type="number" min={1} max={SHARE_MAX_VIEWS} value={maxViews}
                   onChange={(e) => setMaxViews(e.target.value)}
                   className={inputCls}
                 />
@@ -172,7 +175,9 @@ export default function ShareInviteDialog({ studyId, patientName, onClose }) {
               />
             </label>
 
-            <p className="text-xs text-labels-tertiary">Link will expire {new Date(expiryPreview).toLocaleString('en-GB')}.</p>
+            <p className="text-xs text-labels-tertiary">
+              Link will expire {new Date(expiryPreview).toLocaleString('en-GB')}. Links last at most 7 days and {SHARE_MAX_VIEWS} views.
+            </p>
             {stage === 'error' && <p role="alert" className="text-xs text-status-danger">{error}</p>}
 
             <button

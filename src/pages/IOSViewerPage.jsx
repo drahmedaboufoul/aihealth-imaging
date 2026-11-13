@@ -24,7 +24,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, Link, useNavigate, useLocation } from 'react-router-dom';
-import { Loader2, AlertCircle, ArrowLeft, ExternalLink, GitCompare, X, Share2 } from 'lucide-react';
+import { Loader2, AlertCircle, ArrowLeft, ExternalLink, GitCompare, X, Share2, Wrench } from 'lucide-react';
 import { toast } from 'sonner';
 import ShareInviteDialog from '../components/ShareInviteDialog';
 import { LECTURE_FILES, isLectureFixture } from '../lib/lectureFixture';
@@ -421,6 +421,20 @@ export default function IOSViewerPage() {
             <Share2 size={12} className="text-amber-600" />
             Share
           </button>
+        </div>
+      )}
+      {/* IOS workbench (alignment, deviation, contacts, measurements, edits).
+          Staff only: hidden in read-only / shared / demo sessions. */}
+      {!readOnly && !isDemo && studyId && (
+        <div className="absolute top-[6.25rem] right-3 z-30">
+          <Link
+            to={`/viewer/ios/workbench?study=${encodeURIComponent(studyId)}${comparisonStudyInfo?.id ? `&compare=${encodeURIComponent(comparisonStudyInfo.id)}` : ''}`}
+            className="bg-white text-gray-800 text-[11px] font-semibold px-3 py-1.5 rounded-lg shadow-md border border-gray-200 hover:bg-blue-50 hover:border-blue-300 flex items-center gap-1.5"
+            title="Open these scans in the IOS workbench"
+          >
+            <Wrench size={12} className="text-blue-600" />
+            Workbench
+          </Link>
         </div>
       )}
       {showShareDialog && studyId && (

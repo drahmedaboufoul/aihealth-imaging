@@ -104,16 +104,16 @@ function FileModel({
         const ext = fileType?.toLowerCase() || 'stl';
 
         if (ext === 'stl') {
-          const { STLLoader } = await import('three/examples/jsm/loaders/STLLoader');
+          const { STLLoader } = await import('three/examples/jsm/loaders/STLLoader.js');
           loadedGeometry = new STLLoader().parse(arrayBuffer);
         } else if (ext === 'ply') {
-          const { PLYLoader } = await import('three/examples/jsm/loaders/PLYLoader');
+          const { PLYLoader } = await import('three/examples/jsm/loaders/PLYLoader.js');
           loadedGeometry = new PLYLoader().parse(arrayBuffer);
           if (loadedGeometry.hasAttribute('color')) {
             setHasVertexColors(true);
           }
         } else if (ext === 'obj') {
-          const { OBJLoader } = await import('three/examples/jsm/loaders/OBJLoader');
+          const { OBJLoader } = await import('three/examples/jsm/loaders/OBJLoader.js');
           const text = new TextDecoder().decode(arrayBuffer);
           const obj = new OBJLoader().parse(normalizeObjVertexColors(text));
           obj.traverse((child) => {

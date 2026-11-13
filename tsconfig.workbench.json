@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["vite/client"]
+  },
+  "include": ["src/workbench/**/*.ts", "src/workbench/**/*.tsx", "tests/workbench/**/*.ts", "tests/helpers/syntheticMesh.ts"],
+  "exclude": []
+}

@@ -97,4 +97,30 @@ CI (`.github/workflows/`) runs typecheck, lint, the build with inert placeholder
 
 ## Deploy
 
-Vercel builds `main` to production and every PR branch to a preview. Edge functions under `supabase/functions/` are deployed separately with the Supabase CLI; merging this repo does not redeploy them.
+Vercel builds `main` to production and every PR branch to a preview. Edge functions under `supabase/functions/` are deployed separately with the Supabase CLI; merging this repo does not redeploy them. One codebase, two Vercel projects:
+
+| Vercel project | Backend | What it serves |
+|---|---|---|
+| `aihealth-imaging` (existing) | AIHMC EMR Supabase project | this app's CBCT viewer, EMR share links (`/api/imaging-share-resolve`) |
+| kyour imaging cloud (new) | kyour Supabase project, `VITE_IMAGING_BACKEND=kyour` | kyour's CBCT viewer (MPR/3D/pano/implant/TMJ/ceph, AI read with AI tokens), Dental Lab OS launch links (`/launch`), shares via kyour's `imaging-partner` function |
+
+Environment variables:
+
+- Both: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (the project's URL and publishable/anon key).
+- Existing EMR project only (server routes in `api/`): `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+  `SUPABASE_SERVICE_ROLE_KEY` (no `VITE_*` fallback: the routes answer 503 without them),
+  `VITE_PUBLIC_VIEWER_URL` (share links are not minted in production without it), and for `/api/ai-infer`
+  `AI_INFERENCE_URL` + `INFERENCE_INTERNAL_KEY`. The full list of names is in `.env.example`.
+- kyour imaging cloud only: `VITE_IMAGING_BACKEND=kyour`. No server keys: kyour's edge functions do the
+  privileged work. Add the project's URL to kyour's `imaging_partners.viewer_urls` (first entry = default) so
+  partner launch links point at it.
+
+`/viewer/local` (open a scan from this computer, nothing uploaded) works in both. `npm run build` with
+`node scripts/make-sample-cbct.mjs` regenerates the demo phantom in `public/samples`.
+
+## Next steps
+
+See `handoff/IMAGING_SPLIT.md` in the EMR repo. Phase 1 milestones:
+1. Move `src/components/ios-viewer/*` and `src/components/viewers/*` out of EMR
+2. Add a feature flag in the EMR (`imaging.use_external_app`) that swaps window.open targets
+3. AIHMC dogfood at `imaging.aihealth.app` for 2 weeks before flipping the flag for other tenants

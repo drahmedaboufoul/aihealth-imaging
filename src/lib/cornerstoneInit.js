@@ -112,3 +112,76 @@ export const cornerstoneTools = {
   SynchronizerManager,
   annotation: toolsAnnotation,        // annotation manager (read/write/clear)
 };
+
+// ── kyour viewer stack ───────────────────────────────────────────────────────
+// kyour's CBCT viewer (src/components/viewers, shared with kyour-ai) initialises
+// cornerstone through ensureCornerstone(), which also registers the NIfTI loader and the
+// streaming volume loader. Only one of the two inits runs on a page.
+let _modules = null;
+let _initPromise = null;
+
+export async function ensureCornerstone() {
+  if (_modules) return _modules;
+  if (_initPromise) return _initPromise;
+
+  _initPromise = (async () => {
+    const core = await import('@cornerstonejs/core');
+    const tools = await import('@cornerstonejs/tools');
+    const dicomImageLoader = await import('@cornerstonejs/dicom-image-loader');
+
+    await core.init();
+    tools.init();
+    // v4 loader init: configures web workers + registers wadouri loader and
+    // the metadata provider with core. Default worker count is fine.
+    dicomImageLoader.init();
+
+    // NIfTI volume loader — lets the CBCT viewer load the server-converted
+    // .nii.gz (clean baked geometry, no DICOM slice-stripe artifacts) instead
+    // of streaming the raw DICOM stack. Optional: on failure the viewer falls
+    // back to wadouri DICOM. createNiftiImageIdsAndCacheMetadata({ url })
+    // returns imageIds that feed the SAME streaming volume loader below.
+    let niftiLoader = null;
+    try {
+      niftiLoader = await import('@cornerstonejs/nifti-volume-loader');
+      if (typeof niftiLoader.init === 'function') niftiLoader.init();
+      // The package's init() only stashes options — it does NOT register any
+      // loader. createNiftiImageIdsAndCacheMetadata() mints imageIds with the
+      // `nifti:` scheme (`nifti:<url>?frame=N`); without an image loader bound
+      // to that scheme the streaming volume errors with
+      // "No image loader found for scheme 'nifti'". Register the package's
+      // per-frame image loader so the volume can fetch its slices.
+      if (niftiLoader.cornerstoneNiftiImageLoader) {
+        core.imageLoader.registerImageLoader('nifti', niftiLoader.cornerstoneNiftiImageLoader);
+      }
+    } catch (e) {
+      console.warn('[cornerstoneInit] NIfTI loader unavailable:', e?.message);
+    }
+
+    // Register the streaming volume loader so createAndCacheVolume can build
+    // a volume from a wadouri image stack (CBCT MPR).
+    try {
+      core.volumeLoader.registerVolumeLoader(
+        'cornerstoneStreamingImageVolume',
+        core.cornerstoneStreamingImageVolumeLoader
+      );
+      core.volumeLoader.registerUnknownVolumeLoader(
+        core.cornerstoneStreamingImageVolumeLoader
+      );
+    } catch (_) {
+      /* already registered */
+    }
+
+    // Register the tools we use across viewers (idempotent — wrapped).
+    const {
+      addTool, CrosshairsTool, WindowLevelTool, ZoomTool, PanTool,
+      StackScrollTool, LengthTool, TrackballRotateTool, SplineROITool,
+    } = tools;
+    [CrosshairsTool, WindowLevelTool, ZoomTool, PanTool, StackScrollTool, LengthTool, TrackballRotateTool, SplineROITool]
+      .forEach((Tool) => { try { if (Tool) addTool(Tool); } catch (_) { /* already added */ } });
+
+    _modules = { core, tools, dicomImageLoader, niftiLoader };
+    return _modules;
+  })();
+
+  return _initPromise;
+}

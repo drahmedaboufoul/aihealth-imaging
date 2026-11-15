@@ -37,7 +37,7 @@
 set -u
 
 WATCH_VERSION=1.4.3
-WATCH_REQ_SHA=1720046145719cd68ffe95258e607c7f3b5326088bd87aa8487b030610bbc45d
+WATCH_REQ_SHA=d9c37a696f3a6bfe6291bc0ccbf7da89ba312c6c7c7c8dc618861daf955b42e2
 
 HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)
 REQ_FILE=$HOOK_DIR/watch-requirements.txt

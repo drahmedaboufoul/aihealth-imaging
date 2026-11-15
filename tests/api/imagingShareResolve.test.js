@@ -15,7 +15,7 @@ function fixture() {
   return {
     imaging_studies: study,
     imaging_share_invites: { id: 'i1', study_id: 's1', clinic_id: 'c1', source: 'patient',
-      view_count: 0, max_views: 2, revoked_at: null, expires_at: future(), permission: 'view' },
+      view_count: 0, max_views: 2, revoked_at: null, created_at: new Date().toISOString(), expires_at: future(), permission: 'view' },
     clinics: { id: 'c1', is_active: true, suspended_at: null },
     imaging_files: files,
     clinical_media_artifacts: files.map(f => ({ id: `a${f.id}`, source_table: 'imaging_files',
@@ -26,10 +26,11 @@ function fixture() {
       status: 'completed', finalized_count: 2, item_count: 2 } }],
   };
 }
-async function run({ mutate, sign, batchTransform, rpc, claimFails, method = 'POST', body = { token }, afterClaim } = {}) {
+async function run({ mutate, sign, batchTransform, rpc, claimFails, method = 'POST', body = { token }, afterClaim, headers = {}, env = {} } = {}) {
   vi.resetModules();
-  vi.stubEnv('SUPABASE_URL', 'https://synthetic.invalid');
-  vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', 'synthetic-test-value');
+  vi.stubEnv('SUPABASE_URL', env.SUPABASE_URL ?? 'https://synthetic.invalid');
+  vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', env.SUPABASE_SERVICE_ROLE_KEY ?? 'synthetic-test-value');
+  if (env.ALLOWED_ORIGINS !== undefined) vi.stubEnv('ALLOWED_ORIGINS', env.ALLOWED_ORIGINS);
   const rows = fixture(); mutate?.(rows);
   const calls = { signed: [], batches: [], filters: [], rpc: [] };
   const client = {
@@ -75,7 +76,7 @@ async function run({ mutate, sign, batchTransform, rpc, claimFails, method = 'PO
   };
   const { createClient } = await import('@supabase/supabase-js'); createClient.mockReturnValue(client);
   const { default: handler } = await import('../../api/imaging-share-resolve');
-  const res = makeRes(); await handler(makeReq({ method, body }), res);
+  const res = makeRes(); await handler(makeReq({ method, body, headers }), res);
   return { res, calls, rows };
 }
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
@@ -85,7 +86,7 @@ describe('share resolution release and immutable manifest authorization', () => 
     const { res, calls } = await run();
     expect(res.statusCode).toBe(200);
     expect(res.body.files).toHaveLength(2);
-    expect(res.body.files[1]).toMatchObject({ fileId: 'f2', seriesInstanceUid: '1.2.3', instanceNumber: 2, dicomAcquisition: { numberOfFrames: 2 } });
+    expect(res.body.files[1]).toMatchObject({ fileId: 'file-2', seriesInstanceUid: '1.2.3', instanceNumber: 2, dicomAcquisition: { numberOfFrames: 2 } });
     expect(res.body.files[0]).not.toHaveProperty('sha256');
     expect(res.body.view_count).toBe(1);
     expect(Date.parse(res.body.signed_urls_expires_at)).toBeGreaterThan(Date.now());
@@ -171,7 +172,10 @@ describe('share resolution release and immutable manifest authorization', () => 
       if (state === 'exhausted') r.imaging_share_invites.view_count = 2;
     } }); expect(res.statusCode).toBe(403); expect(calls.signed).toHaveLength(0);
   });
-  it('answers CORS preflight', async () => { const { res } = await run({ method: 'OPTIONS' }); expect(res.statusCode).toBe(204); });
+  it('answers an allowlisted CORS preflight', async () => {
+    const { res } = await run({ method: 'OPTIONS', headers: { origin: 'https://aihealth-imaging.vercel.app' } });
+    expect(res.statusCode).toBe(204); expect(res.headers['Access-Control-Allow-Origin']).toBe('https://aihealth-imaging.vercel.app');
+  });
   it('rejects unsupported methods', async () => { const { res } = await run({ method: 'GET' }); expect(res.statusCode).toBe(405); });
 });
 
@@ -222,5 +226,98 @@ it.each([
 it('binds reordered batch-signing results by path rather than array position', async () => {
   const { res } = await run({ batchTransform: data => [...data].reverse() });
   expect(res.statusCode).toBe(200);
-  expect(res.body.files[0]).toMatchObject({ fileId: 'f1', url: 'https://signed.invalid/c1/s1/1.dcm' });
+  expect(res.body.files[0]).toMatchObject({ fileId: 'file-1', url: 'https://signed.invalid/c1/s1/1.dcm' });
+});
+
+describe('M0 share caps (7 days, 20 views) are enforced by the resolver', () => {
+  const days = n => n * 86400000;
+  it.each([
+    ['validity longer than 7 days', r => { const now = Date.now(); Object.assign(r.imaging_share_invites, { created_at: new Date(now - days(1)).toISOString(), expires_at: new Date(now + days(13)).toISOString() }); }],
+    ['expiry more than 7 days ahead', r => { Object.assign(r.imaging_share_invites, { created_at: new Date(Date.now() + days(2)).toISOString(), expires_at: new Date(Date.now() + days(8)).toISOString() }); }],
+    ['more than 20 views', r => { r.imaging_share_invites.max_views = 50; }],
+    ['a non-integer view limit', r => { r.imaging_share_invites.max_views = 2.5; }],
+    ['no created_at to measure validity from', r => { delete r.imaging_share_invites.created_at; }],
+  ])('rejects an invite with %s before claiming a view or signing', async (_, mutate) => {
+    const { res, calls } = await run({ mutate });
+    expect(res.statusCode).toBe(403);
+    expect(calls.signed).toHaveLength(0);
+    expect(calls.filters).not.toContainEqual(['imaging_share_invites', 'eq', 'view_count', 0]);
+  });
+  it('accepts an invite at exactly 7 days and 20 views', async () => {
+    const { res } = await run({ mutate: r => { const now = Date.now(); Object.assign(r.imaging_share_invites, { created_at: new Date(now).toISOString(), expires_at: new Date(now + days(7)).toISOString(), max_views: 20 }); } });
+    expect(res.statusCode).toBe(200);
+  });
+  it('still rejects an expired invite', async () => {
+    const { res, calls } = await run({ mutate: r => { r.imaging_share_invites.expires_at = new Date(Date.now() - 1000).toISOString(); } });
+    expect(res.statusCode).toBe(403); expect(calls.signed).toHaveLength(0);
+  });
+});
+
+describe('resolver output carries no recipient email, patient identity or row ids', () => {
+  const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+  const uuid = n => `0000000${n % 10}-aaaa-4bbb-8ccc-${String(n).padStart(12, 'd')}`;
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const withUuids = r => {
+    const ids = { study: uuid(1), clinic: uuid(2), patient: uuid(3), invite: uuid(4) };
+    const matrices = {};
+    Object.assign(r.imaging_studies, { id: ids.study, clinic_id: ids.clinic, patient_id: ids.patient,
+      description: 'Synthetic Example CBCT', viewer_annotations: { mesh_alignment: { coordinate_frame: 'y_up', matrices } } });
+    Object.assign(r.imaging_share_invites, { id: ids.invite, study_id: ids.study, clinic_id: ids.clinic, invited_email: 'recipient@example.test' });
+    r.clinics.id = ids.clinic;
+    r.imaging_files.forEach((f, i) => {
+      const artifact = r.clinical_media_artifacts.find(a => a.source_id === f.id);
+      Object.assign(f, { id: uuid(10 + i), clinic_id: ids.clinic });
+      Object.assign(artifact, { id: uuid(20 + i), source_id: f.id, clinic_id: ids.clinic, patient_id: ids.patient });
+      matrices[f.id] = identity;
+    });
+    matrices[uuid(99)] = identity; // a file outside this share
+    Object.assign(r.patient_external_imaging_intakes[0], { study_id: ids.study, clinic_id: ids.clinic, patient_id: ids.patient });
+    Object.assign(r.patient_external_imaging_intakes[0].session, { study_id: ids.study, clinic_id: ids.clinic, patient_id: ids.patient });
+  };
+  it('omits invited_email, patient name, description and study/file/artifact UUIDs', async () => {
+    const { res } = await run({ mutate: withUuids });
+    expect(res.statusCode).toBe(200);
+    // Signed URLs embed storage paths (known residual, see PR notes); check everything else.
+    const { files, niftiUrl: _nifti, ...rest } = res.body;
+    const visible = JSON.stringify({ ...rest, files: files.map(({ url: _url, ...f }) => f) });
+    expect(visible).not.toMatch(UUID_RE);
+    expect(visible).not.toContain('@');
+    expect(visible).not.toContain('Synthetic Example');
+    expect(res.body).not.toHaveProperty('invited_email');
+    expect(Object.keys(res.body.study).sort()).toEqual(['study_date', 'study_type']);
+    expect(files.map(f => f.fileId)).toEqual(['file-1', 'file-2']);
+  });
+  it('re-keys saved mesh alignment to the opaque file references', async () => {
+    const { res } = await run({ mutate: withUuids });
+    expect(res.body.viewer_annotations.mesh_alignment.matrices).toEqual({ 'file-1': identity, 'file-2': identity });
+  });
+});
+
+describe('resolver configuration and CORS', () => {
+  it('returns 503 without SUPABASE_URL even when VITE_SUPABASE_URL is set', async () => {
+    vi.stubEnv('VITE_SUPABASE_URL', 'https://vite-fallback.invalid');
+    const { res, calls } = await run({ env: { SUPABASE_URL: '' } });
+    expect(res.statusCode).toBe(503); expect(calls.signed).toHaveLength(0);
+  });
+  it('returns 503 without the service role key', async () => {
+    const { res } = await run({ env: { SUPABASE_SERVICE_ROLE_KEY: '' } });
+    expect(res.statusCode).toBe(503);
+  });
+  it('never sends a wildcard and only echoes allowlisted origins', async () => {
+    const allowed = await run({ headers: { origin: 'https://staff.aihealthmc.ae' } });
+    expect(allowed.res.headers['Access-Control-Allow-Origin']).toBe('https://staff.aihealthmc.ae');
+    const other = await run({ headers: { origin: 'https://evil.example' } });
+    expect(other.res.statusCode).toBe(200); // same-origin/non-browser callers are not blocked; browsers get no grant
+    expect(other.res.headers).not.toHaveProperty('Access-Control-Allow-Origin');
+    const preflight = await run({ method: 'OPTIONS', headers: { origin: 'https://evil.example' } });
+    expect(preflight.res.statusCode).toBe(403);
+    for (const r of [allowed, other, preflight]) expect(Object.values(r.res.headers)).not.toContain('*');
+  });
+  it('honours ALLOWED_ORIGINS from the environment', async () => {
+    const env = { ALLOWED_ORIGINS: 'https://viewer.example.test, https://emr.example.test/' };
+    const listed = await run({ env, method: 'OPTIONS', headers: { origin: 'https://emr.example.test' } });
+    expect(listed.res.statusCode).toBe(204);
+    const defaultOnly = await run({ env, method: 'OPTIONS', headers: { origin: 'https://staff.aihealthmc.ae' } });
+    expect(defaultOnly.res.statusCode).toBe(403);
+  });
 });

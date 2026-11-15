@@ -40,3 +40,35 @@ export function sourceArtifactsMatchFiles(study, files, ids, artifacts) {
     && a.storage_bucket === f.storage_bucket && a.storage_path === f.storage_path
     && /^[0-9a-f]{64}$/.test(f.sha256 || '') && a.sha256 === f.sha256).length === 1);
 }
+
+// M0 share caps (mirrored by src/lib/shareInvite.js for minting). The resolver
+// refuses any invite minted or later edited beyond them, whoever created it.
+export const SHARE_MAX_VALIDITY_MS = 7 * 24 * 60 * 60 * 1000;
+export const SHARE_MAX_VIEWS = 20;
+const SHARE_CLOCK_SKEW_MS = 5 * 60 * 1000; // client-computed expiry vs DB created_at
+
+export function inviteWithinShareCaps(invite, nowMs = Date.now()) {
+  const expires = Date.parse(invite?.expires_at);
+  const created = Date.parse(invite?.created_at);
+  const views = invite?.max_views;
+  return Number.isFinite(expires) && Number.isFinite(created)
+    && expires - created <= SHARE_MAX_VALIDITY_MS + SHARE_CLOCK_SKEW_MS
+    && expires - nowMs <= SHARE_MAX_VALIDITY_MS + SHARE_CLOCK_SKEW_MS
+    && Number.isInteger(views) && views >= 1 && views <= SHARE_MAX_VIEWS;
+}
+
+// Outside viewers get per-response file references, never imaging_files ids.
+export const opaqueFileRefs = (files) => new Map(files.map((file, i) => [file.id, `file-${i + 1}`]));
+
+// Saved mesh alignment is keyed by file id; re-key it to the opaque references
+// and drop entries for files outside this share.
+export function shareViewerAnnotations(annotations, refs) {
+  if (!annotations || typeof annotations !== 'object') return null;
+  const alignment = annotations.mesh_alignment;
+  if (!alignment?.matrices || typeof alignment.matrices !== 'object') return annotations;
+  const matrices = {};
+  for (const [id, matrix] of Object.entries(alignment.matrices)) {
+    if (refs.has(id)) matrices[refs.get(id)] = matrix;
+  }
+  return { ...annotations, mesh_alignment: { ...alignment, matrices } };
+}

@@ -14,15 +14,22 @@ import { dicomStudySeries, dicomFrameIds } from './dicomSeries';
  * skip the Supabase auth gate — the token already WAS the auth, and the
  * payload carries pre-signed URLs so no RLS-protected reads are needed.
  *
- * Payload shape (see api/imaging-share-resolve.js):
+ * Payload shape (see api/imaging-share-resolve.js). No patient identity,
+ * recipient email or study/file row ids — fileId is an opaque 'file-N':
  *   {
- *     study: { id, study_type, study_date, description, patient_name },
- *     files: [{ url, fileName, fileKind, sopInstanceUid, fileSize }],
+ *     study: { study_type, study_date },
+ *     files: [{ fileId, url, fileName, fileKind, sopInstanceUid, fileSize }],
  *     niftiUrl,               // signed URL or null
  *     viewer_annotations,     // saved viewer state (v1 array | v2 object)
- *     permission, expires_at, max_views, view_count,
+ *     permission, expires_at, max_views, view_count, source,
  *   }
  */
+
+/** Neutral export filename for a shared volume: scan-YYYY-MM-DD.nii.gz. */
+export function shareDownloadName(studyDate, ext = 'nii.gz') {
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(String(studyDate || ''));
+  return match ? `scan-${match[1]}.${ext}` : `scan.${ext}`;
+}
 
 export const SHARE_EXPIRED_MESSAGE =
   'Shared session not found — reopen the share link you were sent.';

@@ -10,6 +10,10 @@
 //
 // ASSISTIVE ONLY — flags for clinician review, never an autonomous diagnosis.
 //
+// OUTSIDE AI IS OFF BY DEFAULT (M0): the image is only forwarded when the
+// operator sets ALLOW_CROSS_BORDER_AI=true (see crossBorderPolicy.ts);
+// otherwise every request gets a 403 before anything is read or sent.
+//
 // Auth: verify_jwt = true at the gateway (only signed-in clinic staff reach
 // here). When a study_id is supplied we additionally RLS-check that the caller
 // can read the study and persist the reading to imaging_studies.ai_analysis
@@ -20,6 +24,7 @@
 // ai-read-cbct so both AI surfaces behave identically.
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { crossBorderAiDecision } from "./crossBorderPolicy.ts";
 
 const PRIMARY_MODEL = "claude-opus-4-5";
 const FALLBACK_MODEL = "claude-sonnet-4-6";
@@ -224,24 +229,19 @@ serve(async (req) => {
   if (req.method !== "POST") return jsonResponse({ error: "Use POST" }, 405);
 
   try {
+    // UAE-PHI guard: deny by default. Patient images reach the outside AI
+    // provider only after an explicit ALLOW_CROSS_BORDER_AI=true opt-in, and
+    // DISABLE_CROSS_BORDER_AI=true still overrides that opt-in.
+    const decision = crossBorderAiDecision((name) => Deno.env.get(name));
+    if (!decision.allowed) return jsonResponse(decision.body, decision.status);
+
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
     const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
-    if (!SUPABASE_URL || !ANTHROPIC_API_KEY) {
-      return jsonResponse({ error: "Server not configured (missing SUPABASE_URL / ANTHROPIC_API_KEY)" }, 503);
-    }
-
-    // UAE-PHI defang (P0.1 fix): if the operator has set DISABLE_CROSS_BORDER_AI,
-    // refuse to ship any patient image to a non-UAE AI service. The
-    // Open-Generative-AI self-hosted replacement is being integrated; until
-    // that's live, the right behaviour is to STOP THE BLEEDING — refuse the
-    // call rather than leak PHI to Anthropic (US).
-    if (Deno.env.get("DISABLE_CROSS_BORDER_AI") === "true") {
-      return jsonResponse({
-        error: "AI radiograph reading is temporarily disabled (UAE data residency). Use the open-graph self-hosted endpoint or contact the platform team.",
-        code: "CROSS_BORDER_AI_DISABLED",
-      }, 503);
+    // Fail closed: without the anon key the study RLS check cannot run.
+    if (!SUPABASE_URL || !ANON_KEY || !ANTHROPIC_API_KEY) {
+      return jsonResponse({ error: "AI service not configured" }, 503);
     }
 
     const body = await req.json().catch(() => null);
@@ -256,7 +256,7 @@ serve(async (req) => {
     let study: { id: string; clinic_id: string; patient_id: string } | null = null;
     if (study_id) {
       const authHeader = req.headers.get("Authorization") || "";
-      const userClient = createClient(SUPABASE_URL, ANON_KEY || "", {
+      const userClient = createClient(SUPABASE_URL, ANON_KEY, {
         global: { headers: { Authorization: authHeader } },
         auth: { persistSession: false, autoRefreshToken: false },
       });
@@ -279,7 +279,8 @@ serve(async (req) => {
     }
     if (!resp.ok) {
       const txt = await resp.text().catch(() => "");
-      return jsonResponse({ error: `Anthropic error ${resp.status}`, detail: txt.slice(0, 300) }, resp.status === 429 ? 429 : 502);
+      console.error("[ai-read-radiograph] provider error", resp.status, txt.slice(0, 300));
+      return jsonResponse({ error: "AI reading is unavailable right now. Try again later." }, resp.status === 429 ? 429 : 502);
     }
     const structured = extractStructured(await resp.json());
     if (!structured) return jsonResponse({ error: "Model returned no valid structured findings" }, 502);
@@ -326,6 +327,6 @@ serve(async (req) => {
     return jsonResponse({ status: "ok", radiograph_reader, persisted: !!study });
   } catch (err) {
     console.error("[ai-read-radiograph] error:", err);
-    return jsonResponse({ error: (err as Error)?.message || "Unknown error" }, 500);
+    return jsonResponse({ error: "AI reading failed" }, 500);
   }
 });

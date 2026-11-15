@@ -91,7 +91,9 @@ export default function ToolRail({
   // cross-sections
   xsWidthMM,
   onXsWidthChange,
-  // AI
+  // AI — the tab only exists when an AI feature is enabled for this build
+  // (outside-AI read behind VITE_ENABLE_THIRD_PARTY_AI, or dev placeholders).
+  showAiTab = false,
   onOpenAi,
 }) {
   const planAvailable = PLAN_MODES.has(viewMode);
@@ -100,14 +102,14 @@ export default function ToolRail({
   // Keep the active tab valid across mode switches / session role changes.
   useEffect(() => {
     if (tab === 'plan' && !planAvailable) setTab('image');
-    if (tab === 'ai' && readOnly) setTab('image');
-  }, [tab, planAvailable, readOnly]);
+    if (tab === 'ai' && (readOnly || !showAiTab)) setTab('image');
+  }, [tab, planAvailable, readOnly, showAiTab]);
 
   const tabs = [
     { key: 'image', label: 'Image', icon: ImageIcon },
     { key: 'measure', label: 'Measure', icon: Ruler },
     ...(planAvailable ? [{ key: 'plan', label: 'Plan', icon: Cylinder }] : []),
-    ...(!readOnly ? [{ key: 'ai', label: 'AI', icon: Sparkles }] : []),
+    ...(!readOnly && showAiTab ? [{ key: 'ai', label: 'AI', icon: Sparkles }] : []),
   ];
 
   // Strip implant tool: arm placement (opens the catalog in the Plan tab);
@@ -270,7 +272,7 @@ export default function ToolRail({
               onXsWidthChange={onXsWidthChange}
             />
           )}
-          {tab === 'ai' && !readOnly && <AiTabPanel onOpenAi={onOpenAi} />}
+          {tab === 'ai' && !readOnly && showAiTab && <AiTabPanel onOpenAi={onOpenAi} />}
         </div>
       </div>
     </div>

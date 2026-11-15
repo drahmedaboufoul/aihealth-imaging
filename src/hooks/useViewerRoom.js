@@ -9,15 +9,22 @@
  * The channel is keyed by study id (roomChannelName). Broadcast + presence
  * need only the anon key, so an anonymous share-link follower can join without
  * a Supabase auth session. Nothing but ephemeral view state crosses the wire.
+ *
+ * M0: DISABLED unless VITE_ENABLE_VIEWER_ROOMS=true. A public channel named
+ * after the study UUID can be joined (and published to) by anyone holding the
+ * anon key. Before re-enabling, M1 must move rooms to a private Realtime
+ * channel (`config: { private: true }`) with an RLS policy on
+ * realtime.messages, keyed by a server-issued room id instead of the study id.
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { roomChannelName, statesEqual, throttle } from '../lib/viewerRoom';
+import { ENABLE_VIEWER_ROOMS } from '../lib/featureFlags';
 
 const PUBLISH_MS = 90; // ~11 fps cap on outbound state frames
 
 export function useViewerRoom({ roomId, role, onRemoteState, displayName } = {}) {
-  const enabled = !!roomId && (role === 'operator' || role === 'follower');
+  const enabled = ENABLE_VIEWER_ROOMS && !!roomId && (role === 'operator' || role === 'follower');
   const [connected, setConnected] = useState(false);
   const [participants, setParticipants] = useState(0);
   const [operatorPresent, setOperatorPresent] = useState(false);

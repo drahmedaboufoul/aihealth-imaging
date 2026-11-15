@@ -56,7 +56,10 @@ import { supabase, SUPABASE_URL, SUPABASE_ANON_KEY } from '../lib/supabase';
 import { readSharePayload } from '../lib/sharePayload';
 import { useViewerRoom } from '../hooks/useViewerRoom';
 import { serializeCbctState, applyCbctState, cbctRoomId } from '../lib/viewerRoom';
-import { isSimulatedAiResult } from '../lib/featureFlags';
+import {
+  isSimulatedAiResult, ENABLE_PLACEHOLDER_AI_MODELS, ENABLE_VIEWER_ROOMS, canShowThirdPartyAi,
+} from '../lib/featureFlags';
+import { safeErrorMessage } from '../lib/safeError';
 
 export default function CBCTViewerPage() {
   const [searchParams] = useSearchParams();
@@ -70,7 +73,11 @@ export default function CBCTViewerPage() {
   const shareKey = searchParams.get('share');
   const sharePayload = useMemo(() => readSharePayload(shareKey), [shareKey]);
   const readOnly = searchParams.get('readonly') === '1' || !!shareKey;
-  const effectiveStudyId = studyId || sharePayload?.study?.id || null;
+  // Share payloads carry no study id; the random per-resolution share key is
+  // the local volume cache key for shared sessions.
+  const effectiveStudyId = studyId || (sharePayload ? shareKey : null);
+  // Outside-AI vision read: build flag (default off) + authed, writable study.
+  const showAiRead = canShowThirdPartyAi({ readOnly, hasStudy: !!studyId });
 
   // ── Volume lifecycle (stage / error / progress / presets / refs) ────
   const {
@@ -138,9 +145,12 @@ export default function CBCTViewerPage() {
   // mirrors the operator's view mode / preset / invert / slab. The room is
   // namespaced ':cbct' so it never collides with a live 2D session on the
   // same study id.
+  // OFF by default (ENABLE_VIEWER_ROOMS): public channel keyed by the study
+  // id. M1 needs a private Realtime channel + RLS policy and a server-issued
+  // room id before rooms return.
   const [goLive, setGoLive] = useState(false);
   const applyingRemoteRef = useRef(false); // guard so applied frames don't echo
-  const roomRole = readOnly ? 'follower' : (goLive ? 'operator' : null);
+  const roomRole = !ENABLE_VIEWER_ROOMS ? null : readOnly ? 'follower' : (goLive ? 'operator' : null);
   // Latest local packed frame + latest setter closures — refreshed every
   // render (below switchViewMode's declaration) so the follower always calls
   // the current closures, not stale ones captured at subscribe time.
@@ -154,7 +164,7 @@ export default function CBCTViewerPage() {
   }, []);
 
   const { participants, operatorPresent, operatorName, publish: roomPublish } = useViewerRoom({
-    roomId: effectiveStudyId ? cbctRoomId(effectiveStudyId) : null,
+    roomId: ENABLE_VIEWER_ROOMS && studyId ? cbctRoomId(studyId) : null,
     role: roomRole,
     onRemoteState,
   });
@@ -345,7 +355,7 @@ export default function CBCTViewerPage() {
       }
     } catch (e) {
       console.error('[cbct] AI infer failed:', e);
-      toast.error(`AI inference failed: ${e?.message || e}`);
+      toast.error(`AI inference failed: ${safeErrorMessage(e, 'please try again.')}`);
     } finally {
       setAiRunning((r) => ({ ...r, [modelKey]: false }));
     }
@@ -381,7 +391,7 @@ export default function CBCTViewerPage() {
   // RLS-checks the study and persists the reading into
   // imaging_studies.ai_analysis.cbct_reader.
   const runAiVisionRead = useCallback(async () => {
-    if (!studyId || readOnly) return;
+    if (!showAiRead) return;
     setAiReadStage('running');
     setAiReadError(null);
     try {
@@ -424,15 +434,16 @@ export default function CBCTViewerPage() {
       if (!resp.ok) {
         throw new Error(resp.status === 503
           ? 'AI service not configured on this deployment.'
-          : (body?.error || `AI request failed (${resp.status}).`));
+          : safeErrorMessage(body?.error, `AI request failed (${resp.status}).`));
       }
       setAiReadResult(body?.cbct_reader || null);
       setAiReadStage('done');
     } catch (e) {
-      setAiReadError(e?.message || String(e));
+      console.error('[cbct] AI read failed:', e);
+      setAiReadError(safeErrorMessage(e, 'AI request failed.'));
       setAiReadStage('error');
     }
-  }, [studyId, readOnly, viewMode]);
+  }, [showAiRead, studyId, viewMode]);
 
   // Promote the current implant plan into a formal treatment_plans row
   // in the EMR. Looks up the study's patient + clinic, generates a
@@ -450,7 +461,7 @@ export default function CBCTViewerPage() {
         .select('id, patient_id, clinic_id, study_date')
         .eq('id', studyId)
         .single();
-      if (sErr) throw new Error('Study lookup failed: ' + sErr.message);
+      if (sErr) throw new Error('Study lookup failed.');
       if (!study?.patient_id || !study?.clinic_id) {
         throw new Error('Study is missing patient or clinic — cannot promote.');
       }
@@ -494,13 +505,13 @@ export default function CBCTViewerPage() {
         })
         .select('id')
         .single();
-      if (pErr) throw new Error('Plan insert failed: ' + pErr.message);
+      if (pErr) throw new Error('Plan insert failed.');
 
       setPromoteResult({ planId: plan.id, count: items.length, total: totalAmount });
     } catch (e) {
       console.error('[cbct] promote-to-plan failed:', e);
       // W1: inline dialog error instead of alert() — the form stays open.
-      setPromoteError('Could not create plan: ' + (e?.message || e));
+      setPromoteError('Could not create plan: ' + safeErrorMessage(e, 'please try again.'));
     } finally {
       setPromotingPlan(false);
     }
@@ -556,7 +567,7 @@ export default function CBCTViewerPage() {
         onSwitchMode={switchViewMode}
         stage={stage}
         studyId={studyId}
-        effectiveStudyId={effectiveStudyId}
+        showRooms={ENABLE_VIEWER_ROOMS}
         goLive={goLive}
         onToggleGoLive={() => setGoLive((v) => !v)}
         participants={participants}
@@ -570,7 +581,6 @@ export default function CBCTViewerPage() {
       {showShareDialog && studyId && (
         <ShareInviteDialog
           studyId={studyId}
-          patientName={studyMeta?.patientName}
           onClose={() => setShowShareDialog(false)}
         />
       )}
@@ -629,6 +639,7 @@ export default function CBCTViewerPage() {
             onRunArchAi={() => runAiInference('arch-curve')}
             xsWidthMM={xsWidthMM}
             onXsWidthChange={setXsWidthMM}
+            showAiTab={showAiRead || ENABLE_PLACEHOLDER_AI_MODELS}
             onOpenAi={() => setShowAiModal(true)}
           />
         )}
@@ -679,7 +690,7 @@ export default function CBCTViewerPage() {
       <AiPanel
         open={showAiModal}
         onOpenChange={setShowAiModal}
-        canRunAi={!!studyId && !readOnly}
+        canRunAi={showAiRead}
         aiReadStage={aiReadStage}
         aiReadError={aiReadError}
         aiReadResult={aiReadResult}

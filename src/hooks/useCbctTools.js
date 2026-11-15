@@ -11,6 +11,7 @@
 import { useCallback, useEffect } from 'react';
 import { toast } from 'sonner';
 import { supabase } from '../lib/supabase';
+import { safeErrorMessage } from '../lib/safeError';
 import { cornerstone, cornerstoneTools } from '../lib/cornerstoneInit';
 import {
   renderCrossSection,
@@ -244,7 +245,7 @@ export function useCbctTools({
       toast.success(`Saved ${serialized.length} measurement${serialized.length === 1 ? '' : 's'} + plan data`);
     } catch (e) {
       console.warn('[cbct] save annotations failed:', e?.message);
-      toast.error(`Save failed: ${e?.message || e}`);
+      toast.error(`Save failed: ${safeErrorMessage(e, 'please try again.')}`);
     }
   }, [studyId, readOnly, archPoints, archSlabMM, nervePoints, safetyZoneMM, implants]);
 
@@ -712,7 +713,7 @@ export function useCbctTools({
       setPanoRenderError(null);
     } catch (e) {
       console.error('[pano] render crashed:', e);
-      setPanoRenderError(`Render crashed: ${e?.message || e}`);
+      setPanoRenderError(`Render crashed: ${safeErrorMessage(e, 'unexpected error.')}`);
     }
   }, [stage, viewMode, archPoints, archSlabMM, activePreset, presetTable]);
 

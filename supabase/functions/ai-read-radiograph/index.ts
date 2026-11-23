@@ -20,6 +20,12 @@
 // ai-read-cbct so both AI surfaces behave identically.
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  buildLingshuMessages,
+  callLingshu,
+  extractLingshuStructured,
+  readLingshuConfig,
+} from "./lingshu.ts";
 
 const PRIMARY_MODEL = "claude-opus-4-5";
 const FALLBACK_MODEL = "claude-sonnet-4-6";
@@ -228,23 +234,35 @@ serve(async (req) => {
     const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
     const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY");
-    if (!SUPABASE_URL || !ANTHROPIC_API_KEY) {
-      return jsonResponse({ error: "Server not configured (missing SUPABASE_URL / ANTHROPIC_API_KEY)" }, 503);
+    if (!SUPABASE_URL) {
+      return jsonResponse({ error: "Server not configured (missing SUPABASE_URL)" }, 503);
+    }
+
+    const body = await req.json().catch(() => null);
+    // "claude" (default) is the primary reader; "lingshu" is the self-hosted
+    // second opinion, stored under its own key so it never replaces Claude's.
+    const reader: "claude" | "lingshu" = body?.reader === "lingshu" ? "lingshu" : "claude";
+    const lingshu = reader === "lingshu" ? readLingshuConfig((n) => Deno.env.get(n)) : null;
+    if (reader === "claude" && !ANTHROPIC_API_KEY) {
+      return jsonResponse({ error: "Server not configured (missing ANTHROPIC_API_KEY)" }, 503);
+    }
+    if (reader === "lingshu" && !lingshu) {
+      return jsonResponse({
+        error: "Lingshu second opinion is not configured on this deployment.",
+        code: "LINGSHU_NOT_CONFIGURED",
+      }, 503);
     }
 
     // UAE-PHI defang (P0.1 fix): if the operator has set DISABLE_CROSS_BORDER_AI,
-    // refuse to ship any patient image to a non-UAE AI service. The
-    // Open-Generative-AI self-hosted replacement is being integrated; until
-    // that's live, the right behaviour is to STOP THE BLEEDING — refuse the
-    // call rather than leak PHI to Anthropic (US).
-    if (Deno.env.get("DISABLE_CROSS_BORDER_AI") === "true") {
+    // refuse to ship any patient image to a non-UAE AI service. A Lingshu GPU
+    // counts as in-country only when LINGSHU_DATA_RESIDENCY_UAE is "true".
+    if (Deno.env.get("DISABLE_CROSS_BORDER_AI") === "true" && !(reader === "lingshu" && lingshu?.inUae)) {
       return jsonResponse({
         error: "AI radiograph reading is temporarily disabled (UAE data residency). Use the open-graph self-hosted endpoint or contact the platform team.",
         code: "CROSS_BORDER_AI_DISABLED",
       }, 503);
     }
 
-    const body = await req.json().catch(() => null);
     const study_id: string | undefined = body?.study_id || undefined;
     const study_type: string = typeof body?.study_type === "string" ? body.study_type : "radiograph";
     const image: string = (body?.image || "").replace(/^data:[^,]+,/, "");
@@ -271,22 +289,48 @@ serve(async (req) => {
 
     // Run the vision reading: primary model, fall back on non-429 error, one
     // valid-JSON retry nudge folded into the second attempt.
-    let resp = await callAnthropic(ANTHROPIC_API_KEY, PRIMARY_MODEL, image, mediaType, study_type);
-    let usedModel = PRIMARY_MODEL;
-    if (!resp.ok && resp.status !== 429) {
-      resp = await callAnthropic(ANTHROPIC_API_KEY, FALLBACK_MODEL, image, mediaType, study_type);
-      usedModel = FALLBACK_MODEL;
+    let usedModel: string;
+    let structured: Record<string, unknown> | null;
+    if (reader === "lingshu" && lingshu) {
+      usedModel = lingshu.model;
+      let resp: Response;
+      try {
+        resp = await callLingshu(
+          lingshu,
+          buildLingshuMessages(SYSTEM_PROMPT, image, mediaType, study_type, FINDING_TYPES, SEVERITIES),
+        );
+      } catch (e) {
+        const aborted = (e as Error)?.name === "AbortError";
+        return jsonResponse({
+          error: aborted ? "Lingshu did not answer in time." : "Lingshu server is unreachable.",
+          code: "LINGSHU_UNAVAILABLE",
+        }, 504);
+      }
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => "");
+        return jsonResponse({ error: `Lingshu error ${resp.status}`, detail: txt.slice(0, 300) }, resp.status === 429 ? 429 : 502);
+      }
+      structured = extractLingshuStructured(await resp.json());
+    } else {
+      let resp = await callAnthropic(ANTHROPIC_API_KEY!, PRIMARY_MODEL, image, mediaType, study_type);
+      usedModel = PRIMARY_MODEL;
+      if (!resp.ok && resp.status !== 429) {
+        resp = await callAnthropic(ANTHROPIC_API_KEY!, FALLBACK_MODEL, image, mediaType, study_type);
+        usedModel = FALLBACK_MODEL;
+      }
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => "");
+        return jsonResponse({ error: `Anthropic error ${resp.status}`, detail: txt.slice(0, 300) }, resp.status === 429 ? 429 : 502);
+      }
+      structured = extractStructured(await resp.json());
     }
-    if (!resp.ok) {
-      const txt = await resp.text().catch(() => "");
-      return jsonResponse({ error: `Anthropic error ${resp.status}`, detail: txt.slice(0, 300) }, resp.status === 429 ? 429 : 502);
-    }
-    const structured = extractStructured(await resp.json());
     if (!structured) return jsonResponse({ error: "Model returned no valid structured findings" }, 502);
+    const analysisKey = reader === "lingshu" ? "radiograph_reader_lingshu" : "radiograph_reader";
 
     const result = normalizeResult(structured);
     const radiograph_reader = {
       version: READER_VERSION,
+      reader,
       model: usedModel,
       created_at: new Date().toISOString(),
       ...result,
@@ -302,7 +346,7 @@ serve(async (req) => {
         .from("imaging_studies").select("ai_analysis").eq("id", study.id).maybeSingle();
       const merged = {
         ...((fresh?.ai_analysis && typeof fresh.ai_analysis === "object") ? fresh.ai_analysis : {}),
-        radiograph_reader,
+        [analysisKey]: radiograph_reader,
       };
       await admin.from("imaging_studies")
         .update({ ai_analysis: merged, ai_analyzed: true, updated_at: new Date().toISOString() })
@@ -323,7 +367,7 @@ serve(async (req) => {
       } catch (_) { /* audit row is best-effort */ }
     }
 
-    return jsonResponse({ status: "ok", radiograph_reader, persisted: !!study });
+    return jsonResponse({ status: "ok", reader, radiograph_reader, persisted: !!study });
   } catch (err) {
     console.error("[ai-read-radiograph] error:", err);
     return jsonResponse({ error: (err as Error)?.message || "Unknown error" }, 500);

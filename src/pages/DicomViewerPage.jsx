@@ -114,6 +114,8 @@ export default function DicomViewerPage() {
   const [aiSummary, setAiSummary] = useState('');
   const [aiError, setAiError] = useState(null);
   const [aiModel, setAiModel] = useState(null);
+  // Which reader to run: Claude (primary) or Lingshu (self-hosted second opinion).
+  const [aiReader, setAiReader] = useState('claude');
   const [showAiBoxes, setShowAiBoxes] = useState(true);
   const [activeFinding, setActiveFinding] = useState(null); // index or null
   const [boxTick, setBoxTick] = useState(0); // bump to re-project boxes on camera move
@@ -510,14 +512,17 @@ export default function DicomViewerPage() {
             study_type: imageMeta?.modality === 'PANO' ? 'panoramic' : (imageMeta?.modality || 'radiograph'),
             image: dataUrl,
             mediaType: 'image/png',
+            reader: aiReader,
           }),
         }
       );
       const body = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        const msg = resp.status === 503
-          ? 'AI service not configured on this deployment.'
-          : (body?.error || `AI request failed (${resp.status}).`);
+        const msg = body?.code === 'LINGSHU_NOT_CONFIGURED' || body?.code === 'LINGSHU_UNAVAILABLE'
+          ? (body?.error || 'Lingshu second opinion is unavailable.')
+          : resp.status === 503
+            ? 'AI service not configured on this deployment.'
+            : (body?.error || `AI request failed (${resp.status}).`);
         setAiError(msg);
         setAiStage('error');
         return;
@@ -539,7 +544,7 @@ export default function DicomViewerPage() {
       setAiError(e?.message || String(e));
       setAiStage('error');
     }
-  }, [readOnly, studyId, imageMeta]);
+  }, [readOnly, studyId, imageMeta, aiReader]);
 
   // Re-project AI boxes whenever the camera moves (zoom/pan/rotate/flip) so
   // they stay pinned to anatomy. We just bump a tick; the overlay reads the
@@ -922,6 +927,29 @@ export default function DicomViewerPage() {
                     {showAiBoxes ? 'Hide boxes' : 'Show boxes'}
                   </button>
                 )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-1 mb-1.5" role="radiogroup" aria-label="AI reader">
+                {[
+                  { id: 'claude', label: 'Claude', title: 'Primary AI reader' },
+                  { id: 'lingshu', label: 'Lingshu · 2nd opinion', title: 'Self-hosted Lingshu-32B medical model, saved separately' },
+                ].map((r) => (
+                  <button
+                    key={r.id}
+                    role="radio"
+                    aria-checked={aiReader === r.id}
+                    title={r.title}
+                    disabled={aiStage === 'running'}
+                    onClick={() => setAiReader(r.id)}
+                    className={`text-xs py-1 rounded truncate ${
+                      aiReader === r.id
+                        ? 'bg-fills-f2 text-labels-primary font-medium'
+                        : 'bg-fills-f1 text-labels-tertiary hover:text-labels-primary'
+                    }`}
+                  >
+                    {r.label}
+                  </button>
+                ))}
               </div>
 
               <button
